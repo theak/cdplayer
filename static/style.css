@@ -110,6 +110,10 @@ main {
 .controls.small { margin-top: 0.75rem; }
 .controls.small button { width: 44px; height: 44px; color: var(--muted); }
 .controls.small svg { width: 22px; height: 22px; }
+/* Play and pause icons sit on top of each other and swap with a spin and fade. */
+.playpause svg { grid-area: 1 / 1; transition: opacity 0.2s, transform 0.25s ease; }
+.playpause .icon-pause, .playpause.playing .icon-play { opacity: 0; transform: rotate(-90deg) scale(0.5); }
+.playpause.playing .icon-pause { opacity: 1; transform: none; }
 .controls button:disabled { opacity: 0.25; cursor: default; }
 
 .error { margin: 1.1rem 0 0; color: var(--danger); font-size: 0.9rem; }

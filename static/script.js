@@ -80,8 +80,9 @@ function render(s) {
     $('length').textContent = s.length == null && s.track ? '' : fmt(s.length);
     $('bar').style.width = s.length ? `${Math.min(100, (s.elapsed / s.length) * 100)}%` : '0';
 
-    $('icon-play').hidden = s.state === 'playing';
-    $('icon-pause').hidden = s.state !== 'playing';
+    const playing = s.state === 'playing';
+    $('playpause').classList.toggle('playing', playing);
+    $('playpause').setAttribute('aria-label', playing ? 'Pause' : 'Play');
 
     const enabled = {
         playpause: active || s.state === 'stopped',
