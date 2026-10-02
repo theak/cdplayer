@@ -1,8 +1,9 @@
 # CD Player
 
-Turn a Linux box with a USB CD drive into a CD player: insert an audio CD (or a data CD of MP3 or FLAC files) and it starts playing through the machine's sound card. A small dark-mode web remote handles play/pause, previous/next, stop, and eject, and optional webhooks fire when playback starts and stops — e.g. Home Assistant automations that power a receiver on and off.
+Super simple Rust web app / docker container for playing physical CDs via a nice web interface. Supports audio CDs and mp3/flac data CDs, autoplay, and supports sending webhooks when playback starts or ends to control other equipment.
 
-It's a single Rust binary that talks to the hardware directly: the drive through Linux cdrom/SCSI ioctls (no udev rules or host packages needed), and the sound card through ALSA. Data discs are read with a built-in ISO 9660/Joliet reader and decoded with [Symphonia](https://github.com/pdeljanov/Symphonia), so no mounting or extra privileges are needed. The Docker image is ~24MB.
+<img width="997" height="855" alt="image" src="https://github.com/user-attachments/assets/04716f6e-6f0f-450c-bd77-8a088887deb1" />
+
 
 ## Features
 
