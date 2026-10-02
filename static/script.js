@@ -99,7 +99,7 @@ function render(s) {
     }
 
     // Don't move the slider out from under someone dragging it.
-    if (Date.now() > volumeHeldUntil) $('volume').value = s.volume;
+    if (Date.now() > volumeHeldUntil) setVolumeSlider(s.volume);
 
     renderArt(s);
     renderTracklist(s);
@@ -172,9 +172,28 @@ async function sendVolume(volume) {
     volumeSending = false;
 }
 
+function setVolumeSlider(volume) {
+    $('volume').value = volume;
+    $('volume').style.setProperty('--fill', `${volume}%`);
+}
+
 $('volume').addEventListener('input', (e) => {
     volumeHeldUntil = Date.now() + 2000;
+    setVolumeSlider(e.target.value);
     sendVolume(Number(e.target.value));
+});
+
+// ---- keyboard ----
+
+// Space toggles play/pause, except while typing in a field.
+document.addEventListener('keydown', (e) => {
+    if (e.code !== 'Space' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    const el = e.target;
+    if (el.isContentEditable || el.tagName === 'TEXTAREA'
+        || (el.tagName === 'INPUT' && el.type !== 'range')) return;
+    // Also stops a focused button (e.g. the last one clicked) from being pressed instead.
+    e.preventDefault();
+    if (!$('playpause').disabled) control('playpause');
 });
 
 // ---- settings ----
