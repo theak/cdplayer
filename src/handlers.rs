@@ -70,6 +70,22 @@ pub async fn play_track(State(state): State<AppState>, Path(number): Path<usize>
     }
 }
 
+/// GET `/api/art/{disc_id}` — cover art found on the data disc in the drive.
+pub async fn art(State(state): State<AppState>, Path(disc_id): Path<String>) -> Response {
+    match state.player.lock().await.art(&disc_id) {
+        Some(art) => (
+            [
+                ("content-type", art.mime),
+                // The URL names the disc, so its art never changes.
+                ("cache-control", "max-age=86400".to_string()),
+            ],
+            axum::body::Bytes::from_owner(art.data),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 /// GET `/api/config`
 pub async fn get_config(State(state): State<AppState>) -> Json<Config> {
     Json(state.config.read().await.clone())

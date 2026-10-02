@@ -1,7 +1,8 @@
 //! The playback state machine. A background task calls `tick` once a second to reconcile
-//! with the drive: wake it when it (re)appears, start playing when an audio disc goes in,
-//! announce playback once audio is actually flowing, and notice when playback ends. The
-//! web handlers act on the same state through the shared mutex.
+//! with the drive: wake it when it (re)appears, work out what's playable on a newly
+//! inserted disc (audio CD tracks, or audio files on a data disc), start playing, announce
+//! playback once audio is actually flowing, and notice when playback ends. The web
+//! handlers act on the same state through the shared mutex.
 //!
 //! Webhooks: `start` fires only once audio reaches the sound card, so a failed start (e.g.
 //! the card is busy with AirPlay) never powers the receiver on; `stop` fires whenever a
@@ -12,15 +13,17 @@ use std::time::{Duration, Instant};
 
 use crate::AppState;
 use crate::album::{self, Album};
-use crate::drive::{Disc, Drive, SECTORS_PER_SECOND, Toc, Track};
-use crate::playback::{Outcome, Playback};
+use crate::datadisc::{self, Art};
+use crate::drive::{DataReader, Disc, Drive, SECTORS_PER_SECOND, Toc, Track};
+use crate::iso9660::{self, IsoFile, Volume};
+use crate::playback::{Outcome, Playback, Source};
 use crate::webhook::{self, Event};
 
 /// A disc found this soon after the drive appears was already inside (left in across a
 /// reboot or replug), so it waits for Play instead of surprising anyone by auto-playing.
 const SETTLE: Duration = Duration::from_secs(20);
-/// "Previous" restarts the current track when we're further into it than this.
-const RESTART_THRESHOLD: u32 = 3 * SECTORS_PER_SECOND;
+/// "Previous" restarts the current track when we're further into it than this (seconds).
+const RESTART_THRESHOLD: f64 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -46,6 +49,25 @@ impl Action {
     }
 }
 
+/// What's playable on the disc in the drive.
+enum Program {
+    /// An audio CD's tracks.
+    Cdda(Vec<Track>),
+    /// Audio files on a data disc.
+    Files(Vec<IsoFile>),
+}
+
+/// Background work to fill in a newly inserted disc's track info.
+pub enum Lookup {
+    MusicBrainz(Toc),
+    Scan {
+        disc_id: String,
+        reader: DataReader,
+        volume: Volume,
+        files: Vec<IsoFile>,
+    },
+}
+
 /// One playback run over a disc.
 struct Session {
     playback: Playback,
@@ -58,21 +80,20 @@ pub struct Player {
     audio_device: String,
     session: Option<Session>,
     disc: Disc,
-    tracks: Vec<Track>,
-    /// MusicBrainz disc ID of the disc in the drive, and its album info once looked up.
+    program: Option<Program>,
+    /// Each track's length in seconds, where known.
+    lengths: Vec<Option<f64>>,
+    /// Identifies the disc in the drive, so background lookups only apply to that disc.
     disc_id: Option<String>,
     album: Option<Album>,
+    /// Cover art read off a data disc, served at `/api/art/{disc_id}`.
+    art: Option<Art>,
     /// When the drive last went from missing to present.
     appeared_at: Option<Instant>,
     /// The disc is in but shouldn't auto-play: it was stopped, finished, failed, or was
     /// already in when the drive appeared. Cleared when the disc leaves.
     hold: bool,
     error: Option<String>,
-}
-
-/// Index of the track containing `sector`.
-pub(crate) fn track_index(tracks: &[Track], sector: u32) -> usize {
-    tracks.iter().rposition(|t| sector >= t.start).unwrap_or(0)
 }
 
 impl Player {
@@ -82,9 +103,11 @@ impl Player {
             audio_device,
             session: None,
             disc: Disc::Missing,
-            tracks: Vec::new(),
+            program: None,
+            lengths: Vec::new(),
             disc_id: None,
             album: None,
+            art: None,
             appeared_at: None,
             hold: false,
             error: None,
@@ -92,11 +115,11 @@ impl Player {
     }
 
     fn check_drive(&self) -> Disc {
-        // A known audio disc only needs a cheap presence check; re-identifying it every
-        // second would mean re-reading the TOC under playback.
-        if self.disc.is_audio() {
+        // A loaded disc only needs a cheap presence check; re-identifying it every second
+        // would mean re-reading the TOC under playback.
+        if self.program.is_some() {
             return match self.drive.has_disc() {
-                Some(true) => Disc::Audio,
+                Some(true) => self.disc,
                 Some(false) => Disc::Empty,
                 None => Disc::Missing,
             };
@@ -104,10 +127,9 @@ impl Player {
         self.drive.status()
     }
 
-    /// Reconcile with the drive. Returns the TOC of a newly inserted disc, to look up.
-    async fn poll(&mut self, eject_when_finished: bool, events: &mut Vec<Event>) -> Option<Toc> {
+    /// Reconcile with the drive. Returns background work for a newly inserted disc.
+    async fn poll(&mut self, eject_when_finished: bool, events: &mut Vec<Event>) -> Option<Lookup> {
         let disc = self.check_drive();
-        let mut inserted = None;
 
         // A SuperDrive comes up asleep after every power-on (boot, replug); wake it so it
         // takes discs.
@@ -130,7 +152,7 @@ impl Player {
             }
             self.hold = true;
             match outcome {
-                Outcome::Finished if eject_when_finished && disc.is_audio() => {
+                Outcome::Finished if eject_when_finished && disc.has_media() => {
                     if let Err(e) = self.drive.eject() {
                         eprintln!("cdplayer: eject after finishing failed: {e}");
                     }
@@ -145,39 +167,73 @@ impl Player {
             }
         }
 
-        if !disc.is_audio() {
-            // Disc gone (or drive unplugged) mid-play.
+        let mut lookup = None;
+        if disc != self.disc {
+            // The disc left, or a new one arrived: whatever was loaded no longer applies.
             self.end_session(events).await;
-            self.hold = false;
-            self.tracks.clear();
+            self.program = None;
+            self.lengths.clear();
             self.disc_id = None;
             self.album = None;
-        } else if !self.disc.is_audio() {
+            self.art = None;
             self.error = None;
-            self.hold = self.appeared_at.is_some_and(|t| t.elapsed() < SETTLE);
-            inserted = self.read_toc();
+            self.hold = disc.has_media() && self.appeared_at.is_some_and(|t| t.elapsed() < SETTLE);
+            lookup = self.load(disc);
         }
         self.disc = disc;
 
-        if disc.is_audio() && self.session.is_none() && !self.hold {
-            self.start();
+        if self.program.is_some() && self.session.is_none() && !self.hold {
+            self.start(0);
         }
-        inserted
+        lookup
     }
 
-    /// Read the disc's TOC into `tracks`/`disc_id`, returning it if it has audio tracks.
-    fn read_toc(&mut self) -> Option<Toc> {
-        let toc = self
-            .drive
-            .toc()
-            .inspect_err(|e| eprintln!("cdplayer: couldn't read the track list: {e}"))
-            .ok()?;
-        self.tracks = toc.audio_tracks();
-        if self.tracks.is_empty() {
-            return None;
+    /// Work out what's playable on a newly inserted disc.
+    fn load(&mut self, disc: Disc) -> Option<Lookup> {
+        match disc {
+            Disc::Audio => {
+                let toc = self
+                    .drive
+                    .toc()
+                    .inspect_err(|e| self.error = Some(format!("Couldn't read the disc: {e}")))
+                    .ok()?;
+                let tracks = toc.audio_tracks();
+                if tracks.is_empty() {
+                    return None;
+                }
+                let seconds = |sectors: u32| f64::from(sectors) / f64::from(SECTORS_PER_SECOND);
+                self.lengths = tracks.iter().map(|t| Some(seconds(t.end - t.start))).collect();
+                self.disc_id = Some(toc.musicbrainz_id());
+                self.program = Some(Program::Cdda(tracks));
+                Some(Lookup::MusicBrainz(toc))
+            }
+            Disc::Data => {
+                let read = self.drive.data_reader().and_then(|reader| {
+                    let volume = iso9660::read_volume(&reader)?;
+                    Ok((reader, volume))
+                });
+                let (reader, volume) = read
+                    .inspect_err(|e| eprintln!("cdplayer: couldn't read the data disc: {e}"))
+                    .ok()?;
+                let files = datadisc::audio_files(&volume);
+                if files.is_empty() {
+                    eprintln!("cdplayer: data disc \"{}\" has no audio files", volume.label);
+                    return None;
+                }
+                let disc_id = datadisc::disc_id(&volume, &files);
+                self.album = Some(datadisc::placeholder_album(&volume, &files));
+                self.lengths = vec![None; files.len()];
+                self.disc_id = Some(disc_id.clone());
+                self.program = Some(Program::Files(files.clone()));
+                Some(Lookup::Scan {
+                    disc_id,
+                    reader,
+                    volume,
+                    files,
+                })
+            }
+            Disc::Missing | Disc::Empty => None,
         }
-        self.disc_id = Some(toc.musicbrainz_id());
-        Some(toc)
     }
 
     /// Attach looked-up album info, if that disc is still the one in the drive.
@@ -187,20 +243,44 @@ impl Player {
         }
     }
 
-    fn start(&mut self) {
-        if self.tracks.is_empty() {
-            self.read_toc();
-        }
-        let (Some(first), Some(last)) = (self.tracks.first(), self.tracks.last()) else {
-            self.hold = true;
-            self.error = Some("Couldn't read the disc's track list".into());
+    /// Attach a data disc's scanned tags, lengths, and art.
+    pub fn set_scan(&mut self, disc_id: &str, mut album: Album, lengths: Vec<Option<f64>>, art: Option<Art>) {
+        if self.disc_id.as_deref() != Some(disc_id) {
             return;
+        }
+        album.cover = art.as_ref().map(|_| format!("/api/art/{disc_id}"));
+        self.album = Some(album);
+        self.lengths = lengths;
+        self.art = art;
+    }
+
+    /// The data disc cover art for `disc_id`, if that's the disc in the drive.
+    pub fn art(&self, disc_id: &str) -> Option<Art> {
+        (self.disc_id.as_deref() == Some(disc_id))
+            .then(|| self.art.clone())
+            .flatten()
+    }
+
+    fn start(&mut self, first: usize) {
+        let source = match &self.program {
+            Some(Program::Cdda(tracks)) => self.drive.audio_reader().map(|reader| Source::Cdda {
+                reader,
+                tracks: tracks.clone(),
+            }),
+            Some(Program::Files(files)) => self.drive.data_reader().map(|reader| Source::Files {
+                reader,
+                files: files.clone(),
+            }),
+            None => {
+                self.hold = true;
+                self.error = Some("Nothing to play on this disc".into());
+                return;
+            }
         };
-        let (start, end) = (first.start, last.end);
-        match self.drive.audio_reader() {
-            Ok(reader) => {
+        match source {
+            Ok(source) => {
                 self.session = Some(Session {
-                    playback: Playback::start(reader, self.audio_device.clone(), start, end),
+                    playback: Playback::start(source, self.audio_device.clone(), first),
                     announced: false,
                 });
                 self.error = None;
@@ -222,57 +302,49 @@ impl Player {
         }
     }
 
+    /// Start playing (if stopped) from track `first`, reporting any failure.
+    fn play_from(&mut self, first: usize) -> Result<(), String> {
+        if self.program.is_none() {
+            return Err("Nothing to play in the drive".into());
+        }
+        self.hold = false;
+        self.start(first);
+        self.error.clone().map_or(Ok(()), Err)
+    }
+
     async fn control(&mut self, action: Action, events: &mut Vec<Event>) -> Result<(), String> {
         // Any button press supersedes the last failure's message.
         self.error = None;
         match action {
-            Action::PlayPause => {
-                if let Some(s) = &self.session {
-                    s.playback.set_paused(!s.playback.paused());
-                } else if self.disc.is_audio() {
-                    self.hold = false;
-                    self.start();
-                    if let Some(e) = &self.error {
-                        return Err(e.clone());
-                    }
-                } else {
-                    return Err("No audio CD in the drive".into());
-                }
-            }
+            Action::PlayPause => match &self.session {
+                Some(s) => s.playback.set_paused(!s.playback.paused()),
+                None => self.play_from(0)?,
+            },
             Action::Next | Action::Previous => {
                 let Some(s) = &self.session else {
                     return Err("Not playing".into());
                 };
-                let pos = s.playback.position();
-                let current = track_index(&self.tracks, pos);
-                let into_track = pos.saturating_sub(self.tracks[current].start);
+                let current = s.playback.track();
                 let target = match action {
                     Action::Next => current + 1,
-                    _ if into_track > RESTART_THRESHOLD => current,
+                    _ if s.playback.elapsed() > RESTART_THRESHOLD => current,
                     _ => current.saturating_sub(1),
                 };
                 // Next on the last track is a no-op rather than ending the disc.
-                if let Some(t) = self.tracks.get(target) {
-                    s.playback.seek(t.start);
+                if target < self.lengths.len() {
+                    s.playback.seek(target);
                 }
             }
             Action::Track(i) => {
-                let Some(track) = self.tracks.get(i).copied() else {
+                if i >= self.lengths.len() {
                     return Err("No such track".into());
-                };
-                if self.session.is_none() {
-                    if !self.disc.is_audio() {
-                        return Err("No audio CD in the drive".into());
-                    }
-                    self.hold = false;
-                    self.start();
-                    if let Some(e) = &self.error {
-                        return Err(e.clone());
-                    }
                 }
-                if let Some(s) = &self.session {
-                    s.playback.seek(track.start);
-                    s.playback.set_paused(false);
+                match &self.session {
+                    Some(s) => {
+                        s.playback.seek(i);
+                        s.playback.set_paused(false);
+                    }
+                    None => self.play_from(i)?,
                 }
             }
             Action::Stop => {
@@ -290,24 +362,24 @@ impl Player {
     }
 
     fn status(&self) -> Value {
-        let seconds = |sectors: u32| f64::from(sectors) / f64::from(SECTORS_PER_SECOND);
         let info = |i: usize| self.album.as_ref().and_then(|a| a.tracks.get(i));
         let tracklist: Vec<Value> = self
-            .tracks
+            .lengths
             .iter()
             .enumerate()
-            .map(|(i, t)| {
+            .map(|(i, length)| {
                 json!({
                     "title": info(i).map(|t| &t.title),
                     "artist": info(i).map(|t| &t.artist),
-                    "length": seconds(t.end - t.start),
+                    "length": length,
                 })
             })
             .collect();
+        let playable = self.program.is_some();
         let mut status = json!({
             "drive": self.disc.as_str(),
-            "state": if self.disc.is_audio() { "stopped" } else { "idle" },
-            "tracks": if self.disc.is_audio() { json!(self.tracks.len()) } else { Value::Null },
+            "state": if playable { "stopped" } else { "idle" },
+            "tracks": if playable { json!(self.lengths.len()) } else { Value::Null },
             "track": null,
             "elapsed": null,
             "length": null,
@@ -326,12 +398,10 @@ impl Player {
         if !s.playback.started() && !s.playback.paused() {
             return status; // still spinning up
         }
-        let pos = s.playback.position();
-        let i = track_index(&self.tracks, pos);
-        let track = self.tracks[i];
+        let i = s.playback.track();
         status["track"] = json!(i + 1);
-        status["elapsed"] = json!(seconds(pos.saturating_sub(track.start)));
-        status["length"] = json!(seconds(track.end - track.start));
+        status["elapsed"] = json!(s.playback.elapsed());
+        status["length"] = json!(self.lengths.get(i).copied().flatten());
         status
     }
 }
@@ -340,15 +410,32 @@ impl Player {
 pub async fn tick(state: &AppState) {
     let eject_when_finished = state.config.read().await.eject_when_finished;
     let mut events = Vec::new();
-    let inserted = state
+    let lookup = state
         .player
         .lock()
         .await
         .poll(eject_when_finished, &mut events)
         .await;
     webhook::fire(state, events);
-    if let Some(toc) = inserted {
-        tokio::spawn(album::load(state.clone(), toc));
+    match lookup {
+        Some(Lookup::MusicBrainz(toc)) => {
+            tokio::spawn(album::load(state.clone(), toc));
+        }
+        Some(Lookup::Scan {
+            disc_id,
+            reader,
+            volume,
+            files,
+        }) => {
+            tokio::spawn(datadisc::scan(
+                state.clone(),
+                std::sync::Arc::new(reader),
+                disc_id,
+                volume,
+                files,
+            ));
+        }
+        None => {}
     }
 }
 

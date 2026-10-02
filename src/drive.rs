@@ -8,7 +8,10 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::sync::Arc;
+
+use crate::iso9660::ReadAt;
 
 // <linux/cdrom.h>
 const CDROMREADTOCHDR: u32 = 0x5305;
@@ -49,7 +52,7 @@ pub enum Disc {
     Missing,
     /// No disc, or the drive is still spinning one up.
     Empty,
-    /// A disc with no audio tracks.
+    /// A data disc (which may hold audio files).
     Data,
     /// An audio (or mixed-mode) CD.
     Audio,
@@ -58,6 +61,11 @@ pub enum Disc {
 impl Disc {
     pub fn is_audio(self) -> bool {
         self == Disc::Audio
+    }
+
+    /// Whether there's a disc in the drive at all.
+    pub fn has_media(self) -> bool {
+        matches!(self, Disc::Audio | Disc::Data)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -337,6 +345,12 @@ impl Drive {
         Ok(AudioReader(self.open(false)?))
     }
 
+    /// A handle for reading a data disc's filesystem. This is a normal (blocking) open, so
+    /// the kernel validates the disc and its size before regular reads.
+    pub fn data_reader(&self) -> io::Result<DataReader> {
+        Ok(DataReader(Arc::new(File::open(&self.path)?)))
+    }
+
     /// Unlock the door and eject. Fails with EBUSY if anything else still has the device
     /// open (normally), so stop playback first.
     pub fn eject(&self) -> io::Result<()> {
@@ -366,5 +380,15 @@ impl AudioReader {
             0x00,
         ];
         scsi(&self.0, &cdb, buf)
+    }
+}
+
+/// An open handle for reading a data disc's 2048-byte sectors.
+#[derive(Clone)]
+pub struct DataReader(Arc<File>);
+
+impl ReadAt for DataReader {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        FileExt::read_exact_at(&*self.0, buf, offset)
     }
 }

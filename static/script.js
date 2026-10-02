@@ -9,7 +9,7 @@ const fmt = (s) => {
 const DRIVE_LABELS = {
     missing: 'No drive connected',
     empty: 'No disc',
-    data: 'Not an audio CD',
+    data: 'No MP3 or FLAC files on this disc',
 };
 
 // A failed action's message, shown briefly over the status's own error.
@@ -31,7 +31,7 @@ function renderTracklist(s) {
             if (t.artist && s.album && t.artist !== s.album.artist) {
                 name.append(' ', Object.assign(document.createElement('span'), { className: 'who', textContent: t.artist }));
             }
-            const dur = Object.assign(document.createElement('span'), { className: 'dur', textContent: fmt(t.length) });
+            const dur = Object.assign(document.createElement('span'), { className: 'dur', textContent: t.length == null ? '' : fmt(t.length) });
             li.append(num, name, dur);
             li.addEventListener('click', () => post(`/api/track/${i + 1}`));
             return li;
@@ -60,7 +60,7 @@ function render(s) {
     $('status').textContent =
         s.state === 'playing' ? (info && info.title ? `Playing · ${position}` : 'Playing')
         : s.state === 'paused' ? (info && info.title ? `Paused · ${position}` : 'Paused')
-        : s.drive === 'audio' ? `Stopped · ${s.tracks} tracks`
+        : s.state === 'stopped' ? `Stopped · ${s.tracks} tracks`
         : DRIVE_LABELS[s.drive];
     $('track').textContent =
         info && info.title ? info.title
@@ -68,6 +68,7 @@ function render(s) {
         : active ? 'Starting…'
         : s.album ? s.album.title
         : s.drive === 'audio' ? 'Audio CD'
+        : s.state === 'stopped' ? 'Data disc'
         : '—';
     $('subtitle').textContent = s.album
         ? (s.track ? `${(info && info.artist) || s.album.artist} — ${s.album.title}` : s.album.artist)
@@ -75,14 +76,15 @@ function render(s) {
     document.title = info && info.title ? `${info.title} · CD Player` : 'CD Player';
 
     $('elapsed').textContent = fmt(s.elapsed);
-    $('length').textContent = fmt(s.length);
+    // Some MP3s don't record their length; show nothing rather than a wrong 0:00.
+    $('length').textContent = s.length == null && s.track ? '' : fmt(s.length);
     $('bar').style.width = s.length ? `${Math.min(100, (s.elapsed / s.length) * 100)}%` : '0';
 
     $('icon-play').hidden = s.state === 'playing';
     $('icon-pause').hidden = s.state !== 'playing';
 
     const enabled = {
-        playpause: active || s.drive === 'audio',
+        playpause: active || s.state === 'stopped',
         prev: active,
         next: active,
         stop: active,

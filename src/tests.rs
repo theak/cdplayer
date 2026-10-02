@@ -15,8 +15,10 @@ use tower::ServiceExt;
 
 use crate::config::{self, Config};
 use crate::album;
+use crate::datadisc;
+use crate::iso9660;
 use crate::drive::{Toc, Track};
-use crate::{AppState, Settings, build_router, player};
+use crate::{AppState, Settings, build_router, playback, player};
 
 /// A fresh, empty data dir per test.
 fn temp_dir(name: &str) -> PathBuf {
@@ -90,7 +92,7 @@ async fn controls_without_disc() {
     let app = build_router(test_state("controls"));
     let (code, body) = send(app.clone(), "POST", "/api/control/playpause", None).await;
     assert_eq!(code, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "No audio CD in the drive");
+    assert_eq!(body["error"], "Nothing to play in the drive");
 
     let (code, _) = send(app.clone(), "POST", "/api/control/next", None).await;
     assert_eq!(code, StatusCode::CONFLICT);
@@ -345,10 +347,186 @@ fn track_lookup() {
         Track { start: 1000, end: 2000 },
         Track { start: 2000, end: 3000 },
     ];
-    assert_eq!(player::track_index(&tracks, 150), 0);
-    assert_eq!(player::track_index(&tracks, 999), 0);
-    assert_eq!(player::track_index(&tracks, 1000), 1);
-    assert_eq!(player::track_index(&tracks, 2999), 2);
+    assert_eq!(playback::track_index(&tracks, 150), 0);
+    assert_eq!(playback::track_index(&tracks, 999), 0);
+    assert_eq!(playback::track_index(&tracks, 1000), 1);
+    assert_eq!(playback::track_index(&tracks, 2999), 2);
     // Before the first track (the pregap) counts as track 1.
-    assert_eq!(player::track_index(&tracks, 0), 0);
+    assert_eq!(playback::track_index(&tracks, 0), 0);
+}
+
+/// One ISO 9660 directory record.
+fn iso_record(extent: u32, len: u32, is_dir: bool, name: &[u8]) -> Vec<u8> {
+    let mut r = vec![0u8; 33];
+    r[2..6].copy_from_slice(&extent.to_le_bytes());
+    r[6..10].copy_from_slice(&extent.to_be_bytes());
+    r[10..14].copy_from_slice(&len.to_le_bytes());
+    r[14..18].copy_from_slice(&len.to_be_bytes());
+    r[25] = if is_dir { 0x02 } else { 0 };
+    r[28] = 1;
+    r[32] = name.len() as u8;
+    r.extend_from_slice(name);
+    if r.len() % 2 == 1 {
+        r.push(0);
+    }
+    r[0] = r.len() as u8;
+    r
+}
+
+fn ucs2(s: &str) -> Vec<u8> {
+    s.encode_utf16().flat_map(u16::to_be_bytes).collect()
+}
+
+/// A tiny disc image: `B.MP3` and `SUB/A.FLAC` (plus `cover.jpg`), with an optional Joliet
+/// tree naming them `Song B.mp3` and `Sub Folder/Track A.flac`.
+fn iso_image(joliet: bool) -> Vec<u8> {
+    const S: usize = 2048;
+    let mut img = vec![0u8; 30 * S];
+    let sector = |img: &mut Vec<u8>, n: usize, data: &[u8]| img[n * S..n * S + data.len()].copy_from_slice(data);
+    let descriptor = |kind: u8, root: u32, label: &[u8], escape: &[u8]| {
+        let mut d = vec![0u8; S];
+        d[0] = kind;
+        d[1..6].copy_from_slice(b"CD001");
+        d[6] = 1;
+        d[40..72].fill(b' ');
+        d[40..40 + label.len()].copy_from_slice(label);
+        d[88..88 + escape.len()].copy_from_slice(escape);
+        d[156..190].copy_from_slice(&iso_record(root, S as u32, true, &[0]));
+        d[813..829].copy_from_slice(b"2001020304050600");
+        d
+    };
+    let dir = |own: u32, parent: u32, entries: &[Vec<u8>]| {
+        let mut d = iso_record(own, S as u32, true, &[0]);
+        d.extend(iso_record(parent, S as u32, true, &[1]));
+        entries.iter().for_each(|e| d.extend(e));
+        d
+    };
+    // Files' data.
+    sector(&mut img, 24, b"mp3!");
+    sector(&mut img, 26, b"flac");
+    sector(&mut img, 27, b"jpeg");
+
+    sector(&mut img, 16, &descriptor(1, 20, b"MY_DISC", b""));
+    sector(&mut img, 20, &dir(20, 20, &[iso_record(24, 3000, false, b"B.MP3;1"), iso_record(21, S as u32, true, b"SUB")]));
+    sector(&mut img, 21, &dir(21, 20, &[iso_record(26, 10, false, b"A.FLAC;1"), iso_record(27, 4, false, b"COVER.JPG;1")]));
+    let terminator = if joliet {
+        let mut label = ucs2("My Disc");
+        label.resize(32, 0);
+        sector(&mut img, 17, &descriptor(2, 22, &label, b"%/E"));
+        sector(&mut img, 22, &dir(22, 22, &[iso_record(24, 3000, false, &ucs2("Song B.mp3;1")), iso_record(23, S as u32, true, &ucs2("Sub Folder"))]));
+        sector(&mut img, 23, &dir(23, 22, &[iso_record(26, 10, false, &ucs2("Track A.flac;1")), iso_record(27, 4, false, &ucs2("cover.jpg"))]));
+        18
+    } else {
+        17
+    };
+    let mut end = vec![0u8; S];
+    end[0] = 255;
+    end[1..6].copy_from_slice(b"CD001");
+    sector(&mut img, terminator, &end);
+    img
+}
+
+#[test]
+fn iso9660_listing() {
+    let plain = iso9660::read_volume(iso_image(false).as_slice()).unwrap();
+    assert_eq!(plain.label, "MY_DISC");
+    assert_eq!(plain.created, "2001020304050600");
+    let paths: Vec<_> = plain.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["B.MP3", "SUB/A.FLAC", "SUB/COVER.JPG"]);
+    assert_eq!((plain.files[0].start, plain.files[0].len), (24 * 2048, 3000));
+
+    // With a Joliet tree, its long Unicode names win.
+    let joliet = iso9660::read_volume(iso_image(true).as_slice()).unwrap();
+    assert_eq!(joliet.label, "My Disc");
+    let paths: Vec<_> = joliet.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["Song B.mp3", "Sub Folder/Track A.flac", "Sub Folder/cover.jpg"]);
+
+    assert!(iso9660::read_volume(vec![0u8; 40 * 2048].as_slice()).is_err());
+}
+
+#[test]
+fn data_disc_tracks() {
+    let image = std::sync::Arc::new(iso_image(true));
+    let volume = iso9660::read_volume(image.as_slice()).unwrap();
+    let files = datadisc::audio_files(&volume);
+    let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["Song B.mp3", "Sub Folder/Track A.flac"]); // cover.jpg isn't audio
+
+    let placeholder = datadisc::placeholder_album(&volume, &files);
+    assert_eq!(placeholder.tracks[1].title, "Track A");
+
+    let id = datadisc::disc_id(&volume, &files);
+    assert!(id.starts_with("data-"));
+    assert_eq!(id, datadisc::disc_id(&volume, &files));
+    assert_ne!(id, datadisc::disc_id(&volume, &files[..1]));
+
+    // The "files" aren't real audio, so tags fall back to file names; with no art in the
+    // first file's folder, none is found.
+    let (album, lengths, art) = datadisc::scan_files(&image, &volume, &files);
+    assert_eq!(album.title, "My Disc");
+    assert_eq!(album.tracks[0].title, "Song B");
+    assert_eq!(lengths, vec![None, None]);
+    assert!(art.is_none());
+}
+
+#[test]
+#[ignore = "needs CDPLAYER_TEST_ISO pointing at a disc image holding audio files"]
+fn decodes_disc_image() {
+    let path = std::env::var("CDPLAYER_TEST_ISO").expect("CDPLAYER_TEST_ISO");
+    let image = std::sync::Arc::new(std::fs::read(path).unwrap());
+    let volume = iso9660::read_volume(image.as_slice()).unwrap();
+    let files = datadisc::audio_files(&volume);
+    assert!(!files.is_empty());
+
+    let (album, lengths, art) = datadisc::scan_files(&image, &volume, &files);
+    println!("album: {:?} by {:?}, art: {:?}", album.title, album.artist, art.map(|a| (a.mime, a.data.len())));
+    for ((file, info), length) in files.iter().zip(&album.tracks).zip(&lengths) {
+        let mut decoder = datadisc::Decoder::open(&image, file).unwrap();
+        let (rate, channels) = (decoder.rate, decoder.channels as usize);
+        let mut frames = 0;
+        while let Some(samples) = decoder.next().unwrap() {
+            frames += samples.len() / channels;
+        }
+        let decoded = frames as f64 / f64::from(rate);
+        println!("{}: {:?} / {:?}, {rate} Hz x{channels}, decoded {decoded:.2}s, header says {length:?}",
+            file.path, info.title, info.artist);
+        assert!(frames > 0);
+        if let Some(length) = length {
+            assert!((decoded - length).abs() < 0.1, "{}: decoded {decoded} vs {length}", file.path);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "plays CDPLAYER_TEST_ISO's files out loud on CDPLAYER_TEST_DEVICE"]
+async fn plays_disc_image() {
+    use std::time::Duration;
+    let path = std::env::var("CDPLAYER_TEST_ISO").expect("CDPLAYER_TEST_ISO");
+    let device = std::env::var("CDPLAYER_TEST_DEVICE").unwrap_or("default".into());
+    let image = std::fs::read(&path).unwrap();
+    let files = datadisc::audio_files(&iso9660::read_volume(image.as_slice()).unwrap());
+    // A disc image file reads just like a data disc.
+    let reader = crate::drive::Drive::new(path).data_reader().unwrap();
+    let mut playback = playback::Playback::start(playback::Source::Files { reader, files: files.clone() }, device, 0);
+
+    // A second of each track, skipping forward through format changes (48 kHz, mono).
+    for i in 0..files.len() {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(playback.outcome().is_none(), "playback ended early");
+        println!("track {} at {:.2}s", playback.track() + 1, playback.elapsed());
+        assert_eq!(playback.track(), i);
+        assert!(playback.elapsed() > 0.5);
+        if i + 1 < files.len() {
+            playback.seek(i + 1);
+        }
+    }
+    // Pause holds the position; resume continues from it.
+    playback.set_paused(true);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let held = playback.elapsed();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(playback.elapsed(), held);
+    playback.set_paused(false);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(playback.outcome().is_some(), "should finish after the last track");
 }

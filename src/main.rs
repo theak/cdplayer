@@ -3,13 +3,16 @@
 //! and stops (e.g. to power a receiver on and off via Home Assistant).
 //!
 //! It talks to the hardware directly: the drive through ioctls on its block device (see
-//! `drive`), and the sound card through ALSA, fed by a thread that streams the disc's raw
-//! audio (see `playback`). The container only needs the drive and `/dev/snd` passed in.
+//! `drive`), and the sound card through ALSA, fed by a thread that streams an audio CD's
+//! raw audio or decodes the audio files on a data disc (see `playback`). The container only
+//! needs the drive and `/dev/snd` passed in.
 
 mod album;
 mod config;
+mod datadisc;
 mod drive;
 mod handlers;
+mod iso9660;
 mod playback;
 mod player;
 #[cfg(test)]
@@ -98,6 +101,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/status", get(handlers::status))
         .route("/api/control/{action}", post(handlers::control))
         .route("/api/track/{number}", post(handlers::play_track))
+        .route("/api/art/{disc_id}", get(handlers::art))
         .route("/api/config", get(handlers::get_config).post(handlers::save_config))
         .route("/api/webhook-test", post(handlers::test_webhook))
         .with_state(state)

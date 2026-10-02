@@ -1,12 +1,12 @@
 # CD Player
 
-Turn a Linux box with a USB CD drive into a CD player: insert an audio CD and it starts playing through the machine's sound card. A small dark-mode web remote handles play/pause, previous/next, stop, and eject, and optional webhooks fire when playback starts and stops — e.g. Home Assistant automations that power a receiver on and off.
+Turn a Linux box with a USB CD drive into a CD player: insert an audio CD (or a data CD of MP3 or FLAC files) and it starts playing through the machine's sound card. A small dark-mode web remote handles play/pause, previous/next, stop, and eject, and optional webhooks fire when playback starts and stops — e.g. Home Assistant automations that power a receiver on and off.
 
-It's a single Rust binary that talks to the hardware directly: the drive through Linux cdrom/SCSI ioctls (no udev rules or host packages needed), and the sound card through ALSA. The Docker image is ~24MB.
+It's a single Rust binary that talks to the hardware directly: the drive through Linux cdrom/SCSI ioctls (no udev rules or host packages needed), and the sound card through ALSA. Data discs are read with a built-in ISO 9660/Joliet reader and decoded with [Symphonia](https://github.com/pdeljanov/Symphonia), so no mounting or extra privileges are needed. The Docker image is ~24MB.
 
 ## Features
 
-- **Auto-play** an audio CD when it's inserted. A disc that's already in when the drive appears (after a reboot or replug) waits for Play instead.
+- **Auto-play** an audio CD when it's inserted, or the MP3/FLAC files on a data CD (in path order, with titles and art from their tags, or a `cover.jpg`/`folder.jpg` beside them). A disc that's already in when the drive appears (after a reboot or replug) waits for Play instead.
 - **Track info and cover art** from [MusicBrainz](https://musicbrainz.org) and the [Cover Art Archive](https://coverartarchive.org), looked up by disc ID (falling back to a match on track lengths) and cached in the data volume.
 - **Web remote** on port 42781: play/pause, previous/next track, stop, eject, track progress, and a track list you can tap to jump to a track.
 - **Software eject**, since drives like the Apple SuperDrive have no eject button. Optionally ejects automatically when the disc finishes.
