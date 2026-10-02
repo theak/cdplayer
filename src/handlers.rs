@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use crate::AppState;
 use crate::config::{self, Config};
@@ -70,6 +71,22 @@ pub async fn play_track(State(state): State<AppState>, Path(number): Path<usize>
     }
 }
 
+#[derive(Deserialize)]
+pub struct SeekRequest {
+    seconds: f64,
+}
+
+/// POST `/api/seek` `{"seconds": ...}` — jump to that point in the current track.
+pub async fn seek(State(state): State<AppState>, Json(req): Json<SeekRequest>) -> Response {
+    let Ok(to) = Duration::try_from_secs_f64(req.seconds) else {
+        return error(StatusCode::BAD_REQUEST, "Invalid position");
+    };
+    match player::control(&state, Action::Seek(to)).await {
+        Ok(()) => Json(json!({ "success": true })).into_response(),
+        Err(e) => error(StatusCode::CONFLICT, e),
+    }
+}
+
 /// GET `/api/art/{disc_id}` — cover art found on the data disc in the drive.
 pub async fn art(State(state): State<AppState>, Path(disc_id): Path<String>) -> Response {
     match state.player.lock().await.art(&disc_id) {
@@ -93,10 +110,12 @@ pub async fn get_config(State(state): State<AppState>) -> Json<Config> {
 
 /// POST `/api/config` — validate, persist, and apply. Returns the saved settings.
 pub async fn save_config(State(state): State<AppState>, Json(cfg): Json<Config>) -> Response {
-    let cfg = match cfg.normalized() {
+    let mut cfg = match cfg.normalized() {
         Ok(c) => c,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
+    // The settings form doesn't include the volume, which the slider sets.
+    cfg.volume = state.config.read().await.volume;
     if let Err(e) = config::save(&state.config_path, &cfg) {
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -105,6 +124,24 @@ pub async fn save_config(State(state): State<AppState>, Json(cfg): Json<Config>)
     }
     *state.config.write().await = cfg.clone();
     Json(cfg).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct VolumeRequest {
+    volume: u8,
+}
+
+/// POST `/api/volume` `{"volume": 0-100}` — set the playback volume, now and for later
+/// discs.
+pub async fn set_volume(State(state): State<AppState>, Json(req): Json<VolumeRequest>) -> Response {
+    let volume = req.volume.min(100);
+    state.player.lock().await.set_volume(volume);
+    let mut cfg = state.config.write().await;
+    cfg.volume = volume;
+    if let Err(e) = config::save(&state.config_path, &cfg) {
+        eprintln!("cdplayer: couldn't save volume: {e}");
+    }
+    Json(json!({ "volume": volume })).into_response()
 }
 
 #[derive(Deserialize)]

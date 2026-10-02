@@ -72,6 +72,10 @@ main {
     border-radius: 2px;
     overflow: hidden;
 }
+/* A taller hit area around the thin bar, for clicking/tapping to seek. */
+.seek { padding: 8px 0; margin: -8px 0; }
+.seek.enabled { cursor: pointer; }
+.seek.enabled:hover .progress { height: 6px; margin: -1px 0; }
 #bar { height: 100%; width: 0; background: var(--accent); transition: width 1s linear; }
 .times {
     display: flex;
@@ -115,6 +119,17 @@ main {
 .playpause .icon-pause, .playpause.playing .icon-play { opacity: 0; transform: rotate(-90deg) scale(0.5); }
 .playpause.playing .icon-pause { opacity: 1; transform: none; }
 .controls button:disabled { opacity: 0.25; cursor: default; }
+
+/* Volume slider. */
+.volume {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 1.1rem;
+    color: var(--muted);
+}
+.volume svg { width: 20px; height: 20px; flex-shrink: 0; fill: currentColor; }
+.volume input { flex: 1; min-width: 0; accent-color: var(--accent); }
 
 .error { margin: 1.1rem 0 0; color: var(--danger); font-size: 0.9rem; }
 

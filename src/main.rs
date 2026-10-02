@@ -76,13 +76,15 @@ pub struct AppState {
 impl AppState {
     pub fn new(settings: &Settings) -> Self {
         let config_path = settings.data_dir.join("config.json");
+        let config = config::load(&config_path);
         let player = Player::new(
             Drive::new(settings.cd_device.clone()),
             settings.audio_device.clone(),
+            config.volume,
         );
         AppState {
             player: Arc::new(Mutex::new(player)),
-            config: Arc::new(RwLock::new(config::load(&config_path))),
+            config: Arc::new(RwLock::new(config)),
             config_path: Arc::new(config_path),
             albums_dir: Arc::new(settings.data_dir.join("albums")),
             client: reqwest::Client::builder()
@@ -103,6 +105,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/track/{number}", post(handlers::play_track))
         .route("/api/art/{disc_id}", get(handlers::art))
         .route("/api/config", get(handlers::get_config).post(handlers::save_config))
+        .route("/api/seek", post(handlers::seek))
+        .route("/api/volume", post(handlers::set_volume))
         .route("/api/webhook-test", post(handlers::test_webhook))
         .with_state(state)
 }

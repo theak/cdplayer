@@ -7,10 +7,11 @@ use std::sync::Arc;
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTagKey};
 use symphonia::core::probe::{Hint, ProbeResult};
+use symphonia::core::units::{Time, TimeBase};
 
 use crate::AppState;
 use crate::album::{Album, TrackInfo};
@@ -132,6 +133,7 @@ pub struct Decoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
+    time_base: Option<TimeBase>,
     pub rate: u32,
     pub channels: u32,
     buf: Option<(SampleBuffer<i16>, u64, SignalSpec)>,
@@ -152,12 +154,32 @@ impl Decoder {
             .map_err(|e| format!("{}: {e}", file.path))?;
         Ok(Decoder {
             track_id: track.id,
+            time_base: params.time_base,
             rate,
             channels: channels.count() as u32,
             format,
             decoder,
             buf: None,
         })
+    }
+
+    /// Jump to `secs` into the file, returning where it actually landed (seconds), which
+    /// can be a little earlier.
+    pub fn seek(&mut self, secs: f64) -> Result<f64, String> {
+        let time = Time::new(secs.trunc() as u64, secs.fract());
+        let to = SeekTo::Time {
+            time,
+            track_id: Some(self.track_id),
+        };
+        let seeked = self
+            .format
+            .seek(SeekMode::Accurate, to)
+            .map_err(|e| e.to_string())?;
+        self.decoder.reset();
+        Ok(self.time_base.map_or(secs, |tb| {
+            let t = tb.calc_time(seeked.actual_ts);
+            t.seconds as f64 + t.frac
+        }))
     }
 
     /// The next chunk of samples, or `None` at the end of the file.

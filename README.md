@@ -9,7 +9,8 @@ Super simple Rust web app / docker container for playing physical CDs via a nice
 
 - **Auto-play** an audio CD when it's inserted, or the MP3/FLAC files on a data CD (in path order, with titles and art from their tags, or a `cover.jpg`/`folder.jpg` beside them). A disc that's already in when the drive appears (after a reboot or replug) waits for Play instead.
 - **Track info and cover art** from [MusicBrainz](https://musicbrainz.org) and the [Cover Art Archive](https://coverartarchive.org), looked up by disc ID (falling back to a match on track lengths) and cached in the data volume.
-- **Web remote** on port 42781: play/pause, previous/next track, stop, eject, track progress, and a track list you can tap to jump to a track.
+- **Web remote** on port 42781: play/pause, previous/next track, stop, eject, a progress bar you can click to seek, and a track list you can tap to jump to a track.
+- **Volume control** that scales only the CD player's own audio, so the system volume (and AirPlay's level) is untouched. It's remembered across restarts.
 - **Software eject**, since drives like the Apple SuperDrive have no eject button. Optionally ejects automatically when the disc finishes.
 - **Start/stop webhooks**, configured from the remote's Settings panel. `start` fires only once audio is actually playing, so a failed start never powers your receiver on; `stop` fires on stop, eject, end of disc, errors, and container shutdown. Each is a `POST` with body `{"event": "start"}` or `{"event": "stop"}`.
 - **Apple USB SuperDrive support**: the drive is sent Apple's wake-up command whenever it appears, so it takes discs on non-Mac hardware.

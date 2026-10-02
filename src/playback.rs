@@ -8,7 +8,7 @@
 
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -39,17 +39,50 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// The playback volume (0–100), applied to samples on their way to the sound card. It
+/// scales only this app's audio: the card's mixer, which AirPlay also plays through, is
+/// never touched.
+#[derive(Clone)]
+pub struct Gain(Arc<AtomicU8>);
+
+impl Gain {
+    pub fn new(percent: u8) -> Self {
+        Gain(Arc::new(AtomicU8::new(percent.min(100))))
+    }
+
+    pub fn percent(&self) -> u8 {
+        self.0.load(Relaxed)
+    }
+
+    pub fn set(&self, percent: u8) {
+        self.0.store(percent.min(100), Relaxed);
+    }
+
+    /// The sample multiplier. Cubic, so equal steps on the slider sound like roughly
+    /// equal steps in loudness.
+    fn factor(&self) -> f32 {
+        (self.percent() as f32 / 100.0).powi(3)
+    }
+}
+
+impl Default for Gain {
+    fn default() -> Self {
+        Gain::new(100)
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
     paused: AtomicBool,
     /// Set once audio has reached the sound card.
     started: AtomicBool,
-    /// A track to jump to.
-    seek: Mutex<Option<usize>>,
+    /// A track to jump to, and how far into it (seconds).
+    seek: Mutex<Option<(usize, f64)>>,
     /// The track now audible, and how far into it (ms).
     track: AtomicUsize,
     elapsed_ms: AtomicU64,
+    gain: Gain,
 }
 
 impl Shared {
@@ -58,7 +91,7 @@ impl Shared {
         self.elapsed_ms.store((elapsed_secs * 1000.0) as u64, Relaxed);
     }
 
-    fn take_seek(&self) -> Option<usize> {
+    fn take_seek(&self) -> Option<(usize, f64)> {
         self.seek.lock().unwrap().take()
     }
 }
@@ -70,8 +103,11 @@ pub struct Playback {
 
 impl Playback {
     /// Start playing `source` from track `first` on ALSA PCM `device`.
-    pub fn start(source: Source, device: String, first: usize) -> Self {
-        let shared = Arc::new(Shared::default());
+    pub fn start(source: Source, device: String, first: usize, gain: Gain) -> Self {
+        let shared = Arc::new(Shared {
+            gain,
+            ..Default::default()
+        });
         shared.track.store(first, Relaxed);
         let s = shared.clone();
         let thread = std::thread::spawn(move || match source {
@@ -100,10 +136,10 @@ impl Playback {
         self.shared.paused.store(paused, Relaxed);
     }
 
-    /// Jump to the start of `track`.
-    pub fn seek(&self, track: usize) {
-        *self.shared.seek.lock().unwrap() = Some(track);
-        self.shared.report(track, 0.0);
+    /// Jump to `secs` into `track`.
+    pub fn seek(&self, track: usize, secs: f64) {
+        *self.shared.seek.lock().unwrap() = Some((track, secs));
+        self.shared.report(track, secs);
     }
 
     pub fn started(&self) -> bool {
@@ -143,10 +179,11 @@ struct Output {
     pcm: PCM,
     rate: u32,
     channels: u32,
+    gain: Gain,
 }
 
 impl Output {
-    fn open(device: &str, rate: u32, channels: u32) -> Result<Self, String> {
+    fn open(device: &str, rate: u32, channels: u32, gain: &Gain) -> Result<Self, String> {
         let pcm = PCM::new(device, Direction::Playback, false).map_err(|e| {
             if e.errno() == libc::EBUSY {
                 "The speakers are busy. Is AirPlay playing?".to_string()
@@ -165,10 +202,23 @@ impl Output {
             pcm.hw_params(&hw)
         };
         configure().map_err(|e| format!("Couldn't configure audio device {device}: {e}"))?;
-        Ok(Output { pcm, rate, channels })
+        Ok(Output {
+            pcm,
+            rate,
+            channels,
+            gain: gain.clone(),
+        })
     }
 
-    fn write(&self, mut samples: &[i16]) -> alsa::Result<()> {
+    fn write(&self, samples: &[i16]) -> alsa::Result<()> {
+        let factor = self.gain.factor();
+        let scaled: Vec<i16>;
+        let mut samples = if factor < 1.0 {
+            scaled = samples.iter().map(|&x| (x as f32 * factor) as i16).collect();
+            &scaled[..]
+        } else {
+            samples
+        };
         let io = self.pcm.io_i16()?;
         let channels = self.channels as usize;
         while !samples.is_empty() {
@@ -198,7 +248,7 @@ pub(crate) fn track_index(tracks: &[Track], sector: u32) -> usize {
 }
 
 fn play_cdda(reader: &AudioReader, tracks: &[Track], first: usize, device: &str, s: &Shared) -> Outcome {
-    let out = match Output::open(device, 44_100, 2) {
+    let out = match Output::open(device, 44_100, 2, &s.gain) {
         Ok(o) => o,
         Err(e) => return Outcome::Failed(e),
     };
@@ -221,9 +271,11 @@ fn play_cdda(reader: &AudioReader, tracks: &[Track], first: usize, device: &str,
             out.flush();
             return Outcome::Stopped;
         }
-        if let Some(t) = s.take_seek().and_then(|i| tracks.get(i)) {
-            next = t.start;
+        if let Some((t, secs)) = s.take_seek().and_then(|(i, secs)| Some((tracks.get(i)?, secs))) {
+            let into = (secs * f64::from(SECTORS_PER_SECOND)) as u32;
+            next = (t.start + into).min(t.end.saturating_sub(1)).max(t.start);
             out.flush();
+            report(next);
         }
         if s.paused.load(Relaxed) {
             if !was_paused {
@@ -275,9 +327,10 @@ fn read_sectors(reader: &AudioReader, sector: u32, buf: &mut [u8]) -> std::io::R
 fn play_files(reader: &Arc<DataReader>, files: &[IsoFile], first: usize, device: &str, s: &Shared) -> Outcome {
     let mut out: Option<Output> = None;
     let mut i = first;
+    let mut start_at = 0.0; // seconds into track `i` to start from
 
     'tracks: while i < files.len() {
-        s.report(i, 0.0);
+        s.report(i, start_at);
         let mut decoder = match Decoder::open(reader, &files[i]) {
             Ok(d) => d,
             Err(e) => {
@@ -295,13 +348,20 @@ fn play_files(reader: &Arc<DataReader>, files: &[IsoFile], first: usize, device:
             if let Some(previous) = out.take() {
                 let _ = previous.pcm.drain();
             }
-            match Output::open(device, decoder.rate, decoder.channels) {
+            match Output::open(device, decoder.rate, decoder.channels, &s.gain) {
                 Ok(o) => out = Some(o),
                 Err(e) => return Outcome::Failed(e),
             }
         }
         let o = out.as_ref().expect("output open");
-        let mut written: u64 = 0; // frames of this track handed to ALSA
+        let mut written: u64 = 0; // frames of this track handed to ALSA, counting skipped ones
+        if start_at > 0.0 {
+            match decoder.seek(start_at) {
+                Ok(at) => written = (at * f64::from(o.rate)) as u64,
+                Err(e) => eprintln!("cdplayer: couldn't seek in {}: {e}", files[i].path),
+            }
+            start_at = 0.0;
+        }
         let mut paused_in_hw = None; // Some(whether the hardware pause worked) while paused
 
         loop {
@@ -309,9 +369,10 @@ fn play_files(reader: &Arc<DataReader>, files: &[IsoFile], first: usize, device:
                 o.flush();
                 return Outcome::Stopped;
             }
-            if let Some(target) = s.take_seek().filter(|&t| t < files.len()) {
+            if let Some((target, secs)) = s.take_seek().filter(|&(t, _)| t < files.len()) {
                 o.flush();
                 i = target;
+                start_at = secs;
                 continue 'tracks;
             }
             if s.paused.load(Relaxed) {

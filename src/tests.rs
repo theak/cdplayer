@@ -133,6 +133,41 @@ async fn settings_round_trip() {
 }
 
 #[tokio::test]
+async fn volume_persists_and_survives_settings_saves() {
+    let state = test_state("volume");
+    let path = state.config_path.as_ref().clone();
+    let app = build_router(state);
+
+    let (_, body) = send(app.clone(), "GET", "/api/status", None).await;
+    assert_eq!(body["volume"], 100);
+
+    let (code, body) = send(app.clone(), "POST", "/api/volume", Some(json!({ "volume": 40 }))).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(body["volume"], 40);
+    let (_, body) = send(app.clone(), "GET", "/api/status", None).await;
+    assert_eq!(body["volume"], 40);
+    assert_eq!(config::load(&path).volume, 40);
+
+    // Saving the settings form, which has no volume field, keeps it.
+    let form = json!({ "start_webhook": "", "stop_webhook": "", "eject_when_finished": true });
+    send(app.clone(), "POST", "/api/config", Some(form)).await;
+    assert_eq!(config::load(&path).volume, 40);
+
+    // Out of range is clamped.
+    let (_, body) = send(app, "POST", "/api/volume", Some(json!({ "volume": 250 }))).await;
+    assert_eq!(body["volume"], 100);
+}
+
+#[tokio::test]
+async fn seek_needs_playback() {
+    let app = build_router(test_state("seek"));
+    let (code, _) = send(app.clone(), "POST", "/api/seek", Some(json!({ "seconds": 30.0 }))).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    let (code, _) = send(app, "POST", "/api/seek", Some(json!({ "seconds": -1.0 }))).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn settings_reject_bad_urls() {
     let state = test_state("bad-settings");
     let path = state.config_path.as_ref().clone();
@@ -494,6 +529,18 @@ fn decodes_disc_image() {
         if let Some(length) = length {
             assert!((decoded - length).abs() < 0.1, "{}: decoded {decoded} vs {length}", file.path);
         }
+
+        // Seeking halfway leaves about half the file to decode.
+        let mut decoder = datadisc::Decoder::open(&image, file).unwrap();
+        let landed = decoder.seek(decoded / 2.0).unwrap();
+        let mut rest = 0;
+        while let Some(samples) = decoder.next().unwrap() {
+            rest += samples.len() / channels;
+        }
+        let rest = rest as f64 / f64::from(rate);
+        println!("  seek to {:.2}s landed at {landed:.2}s, {rest:.2}s left", decoded / 2.0);
+        assert!((landed - decoded / 2.0).abs() < 0.1);
+        assert!((landed + rest - decoded).abs() < 0.1);
     }
 }
 
@@ -507,17 +554,25 @@ async fn plays_disc_image() {
     let files = datadisc::audio_files(&iso9660::read_volume(image.as_slice()).unwrap());
     // A disc image file reads just like a data disc.
     let reader = crate::drive::Drive::new(path).data_reader().unwrap();
-    let mut playback = playback::Playback::start(playback::Source::Files { reader, files: files.clone() }, device, 0);
+    let mut playback = playback::Playback::start(playback::Source::Files { reader, files: files.clone() }, device, 0, playback::Gain::new(60));
+
+    // Seek into the first track, then let it play on from there.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    playback.seek(0, 3.0);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    println!("track 1 after seeking to 3s: {:.2}s", playback.elapsed());
+    assert!(playback.elapsed() > 3.0 && playback.elapsed() < 4.0);
+    playback.seek(1, 0.0);
 
     // A second of each track, skipping forward through format changes (48 kHz, mono).
-    for i in 0..files.len() {
+    for i in 1..files.len() {
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert!(playback.outcome().is_none(), "playback ended early");
         println!("track {} at {:.2}s", playback.track() + 1, playback.elapsed());
         assert_eq!(playback.track(), i);
         assert!(playback.elapsed() > 0.5);
         if i + 1 < files.len() {
-            playback.seek(i + 1);
+            playback.seek(i + 1, 0.0);
         }
     }
     // Pause holds the position; resume continues from it.

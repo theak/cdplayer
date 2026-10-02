@@ -15,6 +15,8 @@ pub struct Config {
     pub stop_webhook: String,
     /// Eject the disc after its last track finishes (the drive has no eject button).
     pub eject_when_finished: bool,
+    /// Playback volume, 0–100. Set from the remote's slider rather than the settings form.
+    pub volume: u8,
 }
 
 impl Default for Config {
@@ -23,6 +25,7 @@ impl Default for Config {
             start_webhook: String::new(),
             stop_webhook: String::new(),
             eject_when_finished: true,
+            volume: 100,
         }
     }
 }
@@ -39,6 +42,7 @@ impl Config {
                 return Err(format!("{label} must start with http:// or https://"));
             }
         }
+        self.volume = self.volume.min(100);
         Ok(self)
     }
 }

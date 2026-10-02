@@ -79,6 +79,9 @@ function render(s) {
     // Some MP3s don't record their length; show nothing rather than a wrong 0:00.
     $('length').textContent = s.length == null && s.track ? '' : fmt(s.length);
     $('bar').style.width = s.length ? `${Math.min(100, (s.elapsed / s.length) * 100)}%` : '0';
+    // Seeking needs the track's length to turn a click into a time.
+    seekLength = active && s.length ? s.length : 0;
+    $('seek').classList.toggle('enabled', seekLength > 0);
 
     const playing = s.state === 'playing';
     $('playpause').classList.toggle('playing', playing);
@@ -94,6 +97,9 @@ function render(s) {
     for (const btn of document.querySelectorAll('[data-action]')) {
         btn.disabled = !enabled[btn.dataset.action];
     }
+
+    // Don't move the slider out from under someone dragging it.
+    if (Date.now() > volumeHeldUntil) $('volume').value = s.volume;
 
     renderArt(s);
     renderTracklist(s);
@@ -122,6 +128,54 @@ async function post(path) {
 }
 
 const control = (action) => post(`/api/control/${action}`);
+
+// ---- seeking ----
+
+let seekLength = 0;
+
+$('seek').addEventListener('click', async (e) => {
+    if (!seekLength) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const fraction = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 0.999);
+    const res = await fetch('/api/seek', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seconds: fraction * seekLength }),
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        flash = { text: data.error || 'Something went wrong', until: Date.now() + 4000 };
+    }
+    refresh();
+});
+
+// ---- volume ----
+
+// Send the slider's value as it moves: one request at a time, always the latest value.
+let volumeHeldUntil = 0;
+let volumeSending = false;
+let volumePending = null;
+
+async function sendVolume(volume) {
+    volumePending = volume;
+    if (volumeSending) return;
+    volumeSending = true;
+    while (volumePending !== null) {
+        const body = JSON.stringify({ volume: volumePending });
+        volumePending = null;
+        await fetch('/api/volume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+        }).catch(() => {});
+    }
+    volumeSending = false;
+}
+
+$('volume').addEventListener('input', (e) => {
+    volumeHeldUntil = Date.now() + 2000;
+    sendVolume(Number(e.target.value));
+});
 
 // ---- settings ----
 

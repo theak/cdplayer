@@ -16,7 +16,7 @@ use crate::album::{self, Album};
 use crate::datadisc::{self, Art};
 use crate::drive::{DataReader, Disc, Drive, SECTORS_PER_SECOND, Toc, Track};
 use crate::iso9660::{self, IsoFile, Volume};
-use crate::playback::{Outcome, Playback, Source};
+use crate::playback::{Gain, Outcome, Playback, Source};
 use crate::webhook::{self, Event};
 
 /// A disc found this soon after the drive appears was already inside (left in across a
@@ -34,6 +34,8 @@ pub enum Action {
     Eject,
     /// Jump to this track (0-based), starting playback if stopped.
     Track(usize),
+    /// Jump to this far into the current track.
+    Seek(Duration),
 }
 
 impl Action {
@@ -78,6 +80,7 @@ struct Session {
 pub struct Player {
     drive: Drive,
     audio_device: String,
+    gain: Gain,
     session: Option<Session>,
     disc: Disc,
     program: Option<Program>,
@@ -97,10 +100,11 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(drive: Drive, audio_device: String) -> Self {
+    pub fn new(drive: Drive, audio_device: String, volume: u8) -> Self {
         Player {
             drive,
             audio_device,
+            gain: Gain::new(volume),
             session: None,
             disc: Disc::Missing,
             program: None,
@@ -112,6 +116,11 @@ impl Player {
             hold: false,
             error: None,
         }
+    }
+
+    /// Set the playback volume (0–100); takes effect immediately, mid-track included.
+    pub fn set_volume(&self, percent: u8) {
+        self.gain.set(percent);
     }
 
     fn check_drive(&self) -> Disc {
@@ -280,7 +289,7 @@ impl Player {
         match source {
             Ok(source) => {
                 self.session = Some(Session {
-                    playback: Playback::start(source, self.audio_device.clone(), first),
+                    playback: Playback::start(source, self.audio_device.clone(), first, self.gain.clone()),
                     announced: false,
                 });
                 self.error = None;
@@ -332,7 +341,7 @@ impl Player {
                 };
                 // Next on the last track is a no-op rather than ending the disc.
                 if target < self.lengths.len() {
-                    s.playback.seek(target);
+                    s.playback.seek(target, 0.0);
                 }
             }
             Action::Track(i) => {
@@ -341,11 +350,22 @@ impl Player {
                 }
                 match &self.session {
                     Some(s) => {
-                        s.playback.seek(i);
+                        s.playback.seek(i, 0.0);
                         s.playback.set_paused(false);
                     }
                     None => self.play_from(i)?,
                 }
+            }
+            Action::Seek(to) => {
+                let Some(s) = &self.session else {
+                    return Err("Not playing".into());
+                };
+                let track = s.playback.track();
+                let secs = to.as_secs_f64();
+                if self.lengths.get(track).copied().flatten().is_some_and(|len| secs >= len) {
+                    return Err("That's past the end of the track".into());
+                }
+                s.playback.seek(track, secs);
             }
             Action::Stop => {
                 self.end_session(events).await;
@@ -384,6 +404,7 @@ impl Player {
             "elapsed": null,
             "length": null,
             "error": self.error,
+            "volume": self.gain.percent(),
             "album": self.album.as_ref().map(|a| json!({
                 "title": a.title,
                 "artist": a.artist,
