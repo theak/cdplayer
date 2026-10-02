@@ -15,19 +15,64 @@ const DRIVE_LABELS = {
 // A failed action's message, shown briefly over the status's own error.
 let flash = { text: '', until: 0 };
 
+// Rebuild the track list only when the disc/album info changes, not every poll.
+let tracklistKey = '';
+
+function renderTracklist(s) {
+    const key = JSON.stringify([s.tracklist, s.album]);
+    if (key !== tracklistKey) {
+        tracklistKey = key;
+        const list = $('tracklist');
+        list.replaceChildren(...s.tracklist.map((t, i) => {
+            const li = document.createElement('li');
+            const num = Object.assign(document.createElement('span'), { className: 'num', textContent: i + 1 });
+            const name = Object.assign(document.createElement('span'), { className: 'name', textContent: t.title || `Track ${i + 1}` });
+            // Show per-track artists only where they differ from the album's (compilations, features).
+            if (t.artist && s.album && t.artist !== s.album.artist) {
+                name.append(' ', Object.assign(document.createElement('span'), { className: 'who', textContent: t.artist }));
+            }
+            const dur = Object.assign(document.createElement('span'), { className: 'dur', textContent: fmt(t.length) });
+            li.append(num, name, dur);
+            li.addEventListener('click', () => post(`/api/track/${i + 1}`));
+            return li;
+        }));
+    }
+    $('tracklist-card').hidden = !s.tracklist.length;
+    [...$('tracklist').children].forEach((li, i) => li.classList.toggle('current', s.track === i + 1));
+}
+
+function renderArt(s) {
+    const cover = s.album && s.album.cover;
+    const img = $('art');
+    if (cover && img.dataset.src !== cover) {
+        img.dataset.src = cover;
+        img.src = cover;
+    }
+    img.hidden = !cover || img.dataset.failed === cover;
+    $('art-placeholder').hidden = !img.hidden;
+}
+
 function render(s) {
     const active = s.state === 'playing' || s.state === 'paused';
+    const info = s.track ? s.tracklist[s.track - 1] : null;
+    const position = s.track ? `Track ${s.track} of ${s.tracks}` : '';
 
     $('status').textContent =
-        s.state === 'playing' ? 'Playing'
-        : s.state === 'paused' ? 'Paused'
+        s.state === 'playing' ? (info && info.title ? `Playing · ${position}` : 'Playing')
+        : s.state === 'paused' ? (info && info.title ? `Paused · ${position}` : 'Paused')
         : s.drive === 'audio' ? `Stopped · ${s.tracks} tracks`
         : DRIVE_LABELS[s.drive];
     $('track').textContent =
-        s.track ? `Track ${s.track} of ${s.tracks}`
+        info && info.title ? info.title
+        : s.track ? position
         : active ? 'Starting…'
+        : s.album ? s.album.title
         : s.drive === 'audio' ? 'Audio CD'
         : '—';
+    $('subtitle').textContent = s.album
+        ? (s.track ? `${(info && info.artist) || s.album.artist} — ${s.album.title}` : s.album.artist)
+        : '';
+    document.title = info && info.title ? `${info.title} · CD Player` : 'CD Player';
 
     $('elapsed').textContent = fmt(s.elapsed);
     $('length').textContent = fmt(s.length);
@@ -47,6 +92,9 @@ function render(s) {
         btn.disabled = !enabled[btn.dataset.action];
     }
 
+    renderArt(s);
+    renderTracklist(s);
+
     const err = Date.now() < flash.until ? flash.text : s.error;
     $('error').hidden = !err;
     $('error').textContent = err || '';
@@ -61,14 +109,16 @@ async function refresh() {
     }
 }
 
-async function control(action) {
-    const res = await fetch(`/api/control/${action}`, { method: 'POST' });
+async function post(path) {
+    const res = await fetch(path, { method: 'POST' });
     if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         flash = { text: data.error || 'Something went wrong', until: Date.now() + 4000 };
     }
     refresh();
 }
+
+const control = (action) => post(`/api/control/${action}`);
 
 // ---- settings ----
 
@@ -114,6 +164,13 @@ async function testWebhook(event) {
 }
 
 // ---- wiring ----
+
+// A broken cover URL falls back to the disc drawing.
+$('art').addEventListener('error', () => {
+    $('art').dataset.failed = $('art').dataset.src;
+    $('art').hidden = true;
+    $('art-placeholder').hidden = false;
+});
 
 for (const btn of document.querySelectorAll('[data-action]')) {
     btn.addEventListener('click', () => control(btn.dataset.action));

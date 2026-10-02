@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 use crate::config::{self, Config};
-use crate::drive::{Track, audio_tracks};
+use crate::album;
+use crate::drive::{Toc, Track};
 use crate::{AppState, Settings, build_router, player};
 
 /// A fresh, empty data dir per test.
@@ -223,12 +224,20 @@ async fn notify_uses_configured_url() {
     assert_eq!(*seen.lock().unwrap(), vec![json!({ "event": "stop" })]);
 }
 
+fn toc(tracks: &[(u32, bool)], leadout: u32) -> Toc {
+    Toc {
+        first_track: 1,
+        tracks: tracks.to_vec(),
+        leadout,
+    }
+}
+
 #[test]
 fn audio_tracks_from_toc() {
     // Plain audio CD: each track runs to the next one; the last to the lead-out.
-    let toc = [(0, false), (15000, false), (30000, false), (40000, false)];
+    let plain = toc(&[(0, false), (15000, false), (30000, false)], 40000);
     assert_eq!(
-        audio_tracks(&toc),
+        plain.audio_tracks(),
         vec![
             Track { start: 0, end: 15000 },
             Track { start: 15000, end: 30000 },
@@ -237,20 +246,96 @@ fn audio_tracks_from_toc() {
     );
 
     // Mixed mode: a leading data track is skipped.
-    let toc = [(0, true), (20000, false), (35000, false)];
-    assert_eq!(audio_tracks(&toc), vec![Track { start: 20000, end: 35000 }]);
+    let mixed = toc(&[(0, true), (20000, false)], 35000);
+    assert_eq!(mixed.audio_tracks(), vec![Track { start: 20000, end: 35000 }]);
 
     // Enhanced CD: the last audio track stops short of the session gap before the data.
-    let toc = [(0, false), (20000, false), (50000, true), (60000, false)];
+    let enhanced = toc(&[(0, false), (20000, false), (50000, true)], 60000);
     assert_eq!(
-        audio_tracks(&toc),
+        enhanced.audio_tracks(),
         vec![
             Track { start: 0, end: 20000 },
             Track { start: 20000, end: 50000 - 11_400 },
         ]
     );
 
-    assert!(audio_tracks(&[]).is_empty());
+    assert!(toc(&[], 0).audio_tracks().is_empty());
+}
+
+#[test]
+fn musicbrainz_disc_id() {
+    // The worked example from https://musicbrainz.org/doc/Disc_ID_Calculation (its
+    // offsets include the 150-sector lead-in; ours are raw sector numbers).
+    let disc = toc(
+        &[150, 15363, 32314, 46592, 63414, 80489].map(|o| (o - 150, false)),
+        95462 - 150,
+    );
+    assert_eq!(disc.musicbrainz_id(), "49HHV7Eb8UKF3aQiNmu1GR8vKTY-");
+    assert_eq!(disc.musicbrainz_toc(), "1+6+95462+150+15363+32314+46592+63414+80489");
+
+    // Enhanced CD: the trailing data track is excluded, and the lead-out moves back.
+    let enhanced = toc(&[(0, false), (20000, false), (50000, true)], 60000);
+    assert_eq!(enhanced.musicbrainz_toc(), "1+2+38750+150+20150");
+}
+
+#[test]
+fn musicbrainz_response_parsing() {
+    let tracks = |titles: &[&str]| -> Value {
+        titles
+            .iter()
+            .map(|t| json!({ "title": t, "artist-credit": [] }))
+            .collect()
+    };
+    let response = json!({
+        "releases": [
+            {
+                // Right medium (disc 2 has our ID) but no cover art.
+                "id": "no-art", "title": "Greatest Hits",
+                "artist-credit": [{ "name": "A", "joinphrase": " & " }, { "name": "B", "joinphrase": "" }],
+                "cover-art-archive": { "front": false },
+                "media": [
+                    { "discs": [{ "id": "other" }], "tracks": tracks(&["x"]) },
+                    { "discs": [{ "id": "DISC" }], "tracks": tracks(&["One", "Two"]) },
+                ],
+            },
+            {
+                "id": "with-art", "title": "Greatest Hits (Remaster)",
+                "artist-credit": [{ "name": "A", "joinphrase": "" }],
+                "cover-art-archive": { "front": true },
+                "media": [{
+                    "discs": [{ "id": "DISC" }],
+                    "tracks": [
+                        { "title": "One", "artist-credit": [] },
+                        { "title": "Two", "artist-credit": [{ "name": "Guest", "joinphrase": "" }] },
+                    ],
+                }],
+            },
+        ],
+    });
+    let album = album::parse(&response, "DISC", 2).unwrap();
+    assert_eq!(album.title, "Greatest Hits (Remaster)"); // the one with cover art wins
+    assert_eq!(
+        album.cover.as_deref(),
+        Some("https://coverartarchive.org/release/with-art/front-500")
+    );
+    assert_eq!(album.tracks[0].artist, "A"); // falls back to the album artist
+    assert_eq!(album.tracks[1].artist, "Guest");
+
+    // Without art anywhere, the medium matching the disc ID is used.
+    let no_art = json!({ "releases": [response["releases"][0].clone()] });
+    let album = album::parse(&no_art, "DISC", 2).unwrap();
+    assert_eq!(album.artist, "A & B");
+    assert_eq!(album.cover, None);
+    assert_eq!(album.tracks.len(), 2);
+
+    // Fuzzy TOC matches carry no disc IDs; match the medium by track count.
+    let fuzzy = json!({ "releases": [{
+        "id": "f", "title": "Fuzzy", "artist-credit": [],
+        "media": [{ "tracks": tracks(&["a", "b", "c"]) }],
+    }]});
+    assert_eq!(album::parse(&fuzzy, "DISC", 3).unwrap().title, "Fuzzy");
+    assert!(album::parse(&fuzzy, "DISC", 5).is_none());
+    assert!(album::parse(&json!({}), "DISC", 3).is_none());
 }
 
 #[test]

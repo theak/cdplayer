@@ -58,6 +58,18 @@ pub async fn control(State(state): State<AppState>, Path(action): Path<String>) 
     }
 }
 
+/// POST `/api/track/{number}` — jump to track `number` (1-based), starting playback if
+/// stopped.
+pub async fn play_track(State(state): State<AppState>, Path(number): Path<usize>) -> Response {
+    let Some(index) = number.checked_sub(1) else {
+        return error(StatusCode::NOT_FOUND, "No such track");
+    };
+    match player::control(&state, Action::Track(index)).await {
+        Ok(()) => Json(json!({ "success": true })).into_response(),
+        Err(e) => error(StatusCode::CONFLICT, e),
+    }
+}
+
 /// GET `/api/config`
 pub async fn get_config(State(state): State<AppState>) -> Json<Config> {
     Json(state.config.read().await.clone())

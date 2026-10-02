@@ -16,8 +16,17 @@
 <body>
     <main>
         <section class="player">
+            <div class="art">
+                <img id="art" alt="" hidden>
+                <svg id="art-placeholder" viewBox="0 0 64 64" aria-hidden="true">
+                    <circle cx="32" cy="32" r="26" class="disc"/>
+                    <circle cx="32" cy="32" r="16" class="disc-inner"/>
+                    <circle cx="32" cy="32" r="6" class="disc-hole"/>
+                </svg>
+            </div>
             <p class="status" id="status">Connecting…</p>
             <h1 class="track" id="track">—</h1>
+            <p class="subtitle" id="subtitle"></p>
 
             <div class="progress"><div id="bar"></div></div>
             <div class="times"><span id="elapsed">0:00</span><span id="length">0:00</span></div>
@@ -44,6 +53,10 @@
             </div>
 
             <p class="error" id="error" hidden></p>
+        </section>
+
+        <section class="tracklist" id="tracklist-card" hidden>
+            <ol id="tracklist"></ol>
         </section>
 
         <details class="settings">

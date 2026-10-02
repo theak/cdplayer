@@ -12,6 +12,9 @@ serde_json = "1"
 libc = "0.2"
 # Sound output (links the system alsa-lib).
 alsa = "0.9"
+# MusicBrainz disc IDs.
+sha1 = "0.10"
+base64 = "0.22"
 # rustls + bundled Mozilla roots, so HTTPS webhook URLs validate without relying on the
 # runtime image's CA store. default-features=false drops the native-tls/OpenSSL backend.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }

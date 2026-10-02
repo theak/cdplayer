@@ -77,23 +77,89 @@ pub struct Track {
     pub end: u32,
 }
 
-/// The audio tracks described by TOC entries — `(start sector, is data)` per track, in
-/// order, ending with the lead-out.
-pub fn audio_tracks(entries: &[(u32, bool)]) -> Vec<Track> {
-    entries
-        .windows(2)
-        .filter(|w| !w[0].1)
-        .map(|w| {
-            let (start, _) = w[0];
-            let (next, next_is_data) = w[1];
-            let end = if next_is_data {
-                next.saturating_sub(SESSION_GAP).max(start)
+/// The disc's table of contents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toc {
+    /// Number of the first track (almost always 1).
+    pub first_track: u8,
+    /// `(start sector, is data)` for each track, in order.
+    pub tracks: Vec<(u32, bool)>,
+    /// Where the last track ends.
+    pub leadout: u32,
+}
+
+impl Toc {
+    /// The playable audio tracks.
+    pub fn audio_tracks(&self) -> Vec<Track> {
+        let mut entries = self.tracks.clone();
+        entries.push((self.leadout, false));
+        entries
+            .windows(2)
+            .filter(|w| !w[0].1)
+            .map(|w| {
+                let (start, _) = w[0];
+                let (next, next_is_data) = w[1];
+                let end = if next_is_data {
+                    next.saturating_sub(SESSION_GAP).max(start)
+                } else {
+                    next
+                };
+                Track { start, end }
+            })
+            .collect()
+    }
+
+    /// The first session's last track number and lead-out: on an Enhanced CD (audio
+    /// followed by a data session), the trailing data track is left out, as MusicBrainz
+    /// (via libdiscid) does.
+    fn first_session(&self) -> (u8, u32) {
+        let n = self.tracks.len();
+        let last = self.first_track + n.saturating_sub(1) as u8;
+        match self.tracks.as_slice() {
+            [.., (_, false), (data_start, true)] => (last - 1, data_start.saturating_sub(SESSION_GAP)),
+            _ => (last, self.leadout),
+        }
+    }
+
+    /// The MusicBrainz disc ID: SHA-1 over the hex-encoded track numbers and offsets,
+    /// base64-encoded with `.`, `_`, `-` in place of `+`, `/`, `=`.
+    /// https://musicbrainz.org/doc/Disc_ID_Calculation
+    pub fn musicbrainz_id(&self) -> String {
+        use base64::Engine;
+        use sha1::{Digest, Sha1};
+
+        let (last, leadout) = self.first_session();
+        let mut hex = format!("{:02X}{:02X}{:08X}", self.first_track, last, leadout + 150);
+        for number in 1..=99u8 {
+            let offset = if (self.first_track..=last).contains(&number) {
+                self.tracks
+                    .get((number - self.first_track) as usize)
+                    .map_or(0, |(start, _)| start + 150)
             } else {
-                next
+                0
             };
-            Track { start, end }
-        })
-        .collect()
+            hex.push_str(&format!("{offset:08X}"));
+        }
+        base64::engine::general_purpose::STANDARD
+            .encode(Sha1::digest(hex.as_bytes()))
+            .replace('+', ".")
+            .replace('/', "_")
+            .replace('=', "-")
+    }
+
+    /// The TOC in MusicBrainz's `toc=` lookup format (`first+last+leadout+offsets…`), which
+    /// lets it suggest releases with matching track lengths when the disc ID is unknown.
+    pub fn musicbrainz_toc(&self) -> String {
+        let (last, leadout) = self.first_session();
+        let count = (last + 1 - self.first_track) as usize;
+        let mut parts = vec![
+            self.first_track.to_string(),
+            last.to_string(),
+            (leadout + 150).to_string(),
+        ];
+        parts.extend(self.tracks.iter().take(count).map(|(start, _)| (start + 150).to_string()));
+        parts.join("+")
+    }
 }
 
 /// `sg_io_hdr_t` from <scsi/sg.h>.
@@ -239,8 +305,7 @@ impl Drive {
         }
     }
 
-    /// The disc's audio tracks.
-    pub fn tracks(&self) -> io::Result<Vec<Track>> {
+    pub fn toc(&self) -> io::Result<Toc> {
         let f = self.open(false)?;
         let mut header = TocHeader {
             first_track: 0,
@@ -260,7 +325,12 @@ impl Drive {
             let is_data = track != CDROM_LEADOUT && (entry.adr_ctrl >> 4) & CDROM_DATA_TRACK != 0;
             entries.push((entry.lba.max(0) as u32, is_data));
         }
-        Ok(audio_tracks(&entries))
+        let (leadout, _) = entries.pop().expect("lead-out entry");
+        Ok(Toc {
+            first_track: header.first_track,
+            tracks: entries,
+            leadout,
+        })
     }
 
     pub fn audio_reader(&self) -> io::Result<AudioReader> {

@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 use crate::AppState;
-use crate::drive::{Disc, Drive, SECTORS_PER_SECOND, Track};
+use crate::album::{self, Album};
+use crate::drive::{Disc, Drive, SECTORS_PER_SECOND, Toc, Track};
 use crate::playback::{Outcome, Playback};
 use crate::webhook::{self, Event};
 
@@ -28,6 +29,8 @@ pub enum Action {
     Previous,
     Stop,
     Eject,
+    /// Jump to this track (0-based), starting playback if stopped.
+    Track(usize),
 }
 
 impl Action {
@@ -56,6 +59,9 @@ pub struct Player {
     session: Option<Session>,
     disc: Disc,
     tracks: Vec<Track>,
+    /// MusicBrainz disc ID of the disc in the drive, and its album info once looked up.
+    disc_id: Option<String>,
+    album: Option<Album>,
     /// When the drive last went from missing to present.
     appeared_at: Option<Instant>,
     /// The disc is in but shouldn't auto-play: it was stopped, finished, failed, or was
@@ -77,6 +83,8 @@ impl Player {
             session: None,
             disc: Disc::Missing,
             tracks: Vec::new(),
+            disc_id: None,
+            album: None,
             appeared_at: None,
             hold: false,
             error: None,
@@ -96,8 +104,10 @@ impl Player {
         self.drive.status()
     }
 
-    async fn poll(&mut self, eject_when_finished: bool, events: &mut Vec<Event>) {
+    /// Reconcile with the drive. Returns the TOC of a newly inserted disc, to look up.
+    async fn poll(&mut self, eject_when_finished: bool, events: &mut Vec<Event>) -> Option<Toc> {
         let disc = self.check_drive();
+        let mut inserted = None;
 
         // A SuperDrive comes up asleep after every power-on (boot, replug); wake it so it
         // takes discs.
@@ -140,24 +150,46 @@ impl Player {
             self.end_session(events).await;
             self.hold = false;
             self.tracks.clear();
+            self.disc_id = None;
+            self.album = None;
         } else if !self.disc.is_audio() {
             self.error = None;
             self.hold = self.appeared_at.is_some_and(|t| t.elapsed() < SETTLE);
-            self.tracks = self.drive.tracks().unwrap_or_else(|e| {
-                eprintln!("cdplayer: couldn't read the track list: {e}");
-                Vec::new()
-            });
+            inserted = self.read_toc();
         }
         self.disc = disc;
 
         if disc.is_audio() && self.session.is_none() && !self.hold {
             self.start();
         }
+        inserted
+    }
+
+    /// Read the disc's TOC into `tracks`/`disc_id`, returning it if it has audio tracks.
+    fn read_toc(&mut self) -> Option<Toc> {
+        let toc = self
+            .drive
+            .toc()
+            .inspect_err(|e| eprintln!("cdplayer: couldn't read the track list: {e}"))
+            .ok()?;
+        self.tracks = toc.audio_tracks();
+        if self.tracks.is_empty() {
+            return None;
+        }
+        self.disc_id = Some(toc.musicbrainz_id());
+        Some(toc)
+    }
+
+    /// Attach looked-up album info, if that disc is still the one in the drive.
+    pub fn set_album(&mut self, disc_id: &str, album: Album) {
+        if self.disc_id.as_deref() == Some(disc_id) {
+            self.album = Some(album);
+        }
     }
 
     fn start(&mut self) {
         if self.tracks.is_empty() {
-            self.tracks = self.drive.tracks().unwrap_or_default();
+            self.read_toc();
         }
         let (Some(first), Some(last)) = (self.tracks.first(), self.tracks.last()) else {
             self.hold = true;
@@ -224,6 +256,25 @@ impl Player {
                     s.playback.seek(t.start);
                 }
             }
+            Action::Track(i) => {
+                let Some(track) = self.tracks.get(i).copied() else {
+                    return Err("No such track".into());
+                };
+                if self.session.is_none() {
+                    if !self.disc.is_audio() {
+                        return Err("No audio CD in the drive".into());
+                    }
+                    self.hold = false;
+                    self.start();
+                    if let Some(e) = &self.error {
+                        return Err(e.clone());
+                    }
+                }
+                if let Some(s) = &self.session {
+                    s.playback.seek(track.start);
+                    s.playback.set_paused(false);
+                }
+            }
             Action::Stop => {
                 self.end_session(events).await;
                 self.hold = true;
@@ -239,6 +290,20 @@ impl Player {
     }
 
     fn status(&self) -> Value {
+        let seconds = |sectors: u32| f64::from(sectors) / f64::from(SECTORS_PER_SECOND);
+        let info = |i: usize| self.album.as_ref().and_then(|a| a.tracks.get(i));
+        let tracklist: Vec<Value> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                json!({
+                    "title": info(i).map(|t| &t.title),
+                    "artist": info(i).map(|t| &t.artist),
+                    "length": seconds(t.end - t.start),
+                })
+            })
+            .collect();
         let mut status = json!({
             "drive": self.disc.as_str(),
             "state": if self.disc.is_audio() { "stopped" } else { "idle" },
@@ -247,6 +312,12 @@ impl Player {
             "elapsed": null,
             "length": null,
             "error": self.error,
+            "album": self.album.as_ref().map(|a| json!({
+                "title": a.title,
+                "artist": a.artist,
+                "cover": a.cover,
+            })),
+            "tracklist": tracklist,
         });
         let Some(s) = &self.session else {
             return status;
@@ -258,7 +329,6 @@ impl Player {
         let pos = s.playback.position();
         let i = track_index(&self.tracks, pos);
         let track = self.tracks[i];
-        let seconds = |sectors: u32| f64::from(sectors) / f64::from(SECTORS_PER_SECOND);
         status["track"] = json!(i + 1);
         status["elapsed"] = json!(seconds(pos.saturating_sub(track.start)));
         status["length"] = json!(seconds(track.end - track.start));
@@ -270,13 +340,16 @@ impl Player {
 pub async fn tick(state: &AppState) {
     let eject_when_finished = state.config.read().await.eject_when_finished;
     let mut events = Vec::new();
-    state
+    let inserted = state
         .player
         .lock()
         .await
         .poll(eject_when_finished, &mut events)
         .await;
     webhook::fire(state, events);
+    if let Some(toc) = inserted {
+        tokio::spawn(album::load(state.clone(), toc));
+    }
 }
 
 pub async fn control(state: &AppState, action: Action) -> Result<(), String> {

@@ -7,7 +7,8 @@ It's a single Rust binary that talks to the hardware directly: the drive through
 ## Features
 
 - **Auto-play** an audio CD when it's inserted. A disc that's already in when the drive appears (after a reboot or replug) waits for Play instead.
-- **Web remote** on port 42781: play/pause, previous/next track, stop, eject, track progress.
+- **Track info and cover art** from [MusicBrainz](https://musicbrainz.org) and the [Cover Art Archive](https://coverartarchive.org), looked up by disc ID (falling back to a match on track lengths) and cached in the data volume.
+- **Web remote** on port 42781: play/pause, previous/next track, stop, eject, track progress, and a track list you can tap to jump to a track.
 - **Software eject**, since drives like the Apple SuperDrive have no eject button. Optionally ejects automatically when the disc finishes.
 - **Start/stop webhooks**, configured from the remote's Settings panel. `start` fires only once audio is actually playing, so a failed start never powers your receiver on; `stop` fires on stop, eject, end of disc, errors, and container shutdown. Each is a `POST` with body `{"event": "start"}` or `{"event": "stop"}`.
 - **Apple USB SuperDrive support**: the drive is sent Apple's wake-up command whenever it appears, so it takes discs on non-Mac hardware.
@@ -40,7 +41,7 @@ The drive must be plugged in when the container starts (Docker won't start it ot
 
 - `AUDIO_DEVICE` - ALSA output device (default `default`). Naming the card, like `plughw:CARD=PCH,DEV=0`, keeps the right output selected even if cards enumerate in a different order after a reboot. List cards with `aplay -l`; the name is the one in brackets.
 - `CD_DEVICE` - The drive's device (default `/dev/sr0`).
-- `DATA_DIR` - Where settings are stored (default `/data`).
+- `DATA_DIR` - Where settings and cached album info are stored (default `/data`).
 - `PORT` - HTTP port (default `42781`).
 
 There's no authentication, so keep it on your LAN.

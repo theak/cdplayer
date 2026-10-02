@@ -6,6 +6,7 @@
 //! `drive`), and the sound card through ALSA, fed by a thread that streams the disc's raw
 //! audio (see `playback`). The container only needs the drive and `/dev/snd` passed in.
 
+mod album;
 mod config;
 mod drive;
 mod handlers;
@@ -64,6 +65,8 @@ pub struct AppState {
     pub player: Arc<Mutex<Player>>,
     pub config: Arc<RwLock<Config>>,
     pub config_path: Arc<PathBuf>,
+    /// Cached album info, one JSON file per disc ID.
+    pub albums_dir: Arc<PathBuf>,
     pub client: reqwest::Client,
 }
 
@@ -78,6 +81,7 @@ impl AppState {
             player: Arc::new(Mutex::new(player)),
             config: Arc::new(RwLock::new(config::load(&config_path))),
             config_path: Arc::new(config_path),
+            albums_dir: Arc::new(settings.data_dir.join("albums")),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -93,6 +97,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/static/{file}", get(handlers::serve_static))
         .route("/api/status", get(handlers::status))
         .route("/api/control/{action}", post(handlers::control))
+        .route("/api/track/{number}", post(handlers::play_track))
         .route("/api/config", get(handlers::get_config).post(handlers::save_config))
         .route("/api/webhook-test", post(handlers::test_webhook))
         .with_state(state)
