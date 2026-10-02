@@ -1,0 +1,8 @@
+/target
+/data
+.cargo-home
+.env
+.idea/
+.vscode/
+*.swp
+.DS_Store

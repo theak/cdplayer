@@ -1,0 +1,10 @@
+target
+data
+.cargo-home
+.git
+.gitignore
+.dockerignore
+docker-compose.yml
+README.md
+.env
+.github

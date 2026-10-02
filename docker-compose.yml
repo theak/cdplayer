@@ -1,0 +1,20 @@
+services:
+  cdplayer:
+    image: akshaykannan/cdplayer
+    # To build locally instead of pulling from Docker Hub, uncomment:
+    # build: .
+    ports:
+      - "42781:42781"
+    devices:
+      # The drive must be plugged in when the container starts (Docker won't start it
+      # otherwise). Unplugging/replugging while it runs is fine.
+      - /dev/sr0:/dev/sr0
+      - /dev/snd:/dev/snd
+    environment:
+      # Name the card rather than numbering it, so the onboard output stays selected
+      # even if the HDMI card enumerates first after a reboot. List cards with `aplay -l`.
+      - AUDIO_DEVICE=plughw:CARD=PCH,DEV=0
+    volumes:
+      # Settings edited in the web UI (webhook URLs etc.).
+      - ./data:/data
+    restart: unless-stopped

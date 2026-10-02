@@ -1,0 +1,21 @@
+[package]
+name = "cdplayer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Raw cdrom / SG_IO ioctls on the drive's block device.
+libc = "0.2"
+# Sound output (links the system alsa-lib).
+alsa = "0.9"
+# rustls + bundled Mozilla roots, so HTTPS webhook URLs validate without relying on the
+# runtime image's CA store. default-features=false drops the native-tls/OpenSSL backend.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

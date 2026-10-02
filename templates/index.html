@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>CD Player</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0f0f10">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="CD Player">
+    <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+    <link rel="stylesheet" href="/static/style.css">
+    <script defer src="/static/script.js"></script>
+</head>
+<body>
+    <main>
+        <section class="player">
+            <p class="status" id="status">Connecting…</p>
+            <h1 class="track" id="track">—</h1>
+
+            <div class="progress"><div id="bar"></div></div>
+            <div class="times"><span id="elapsed">0:00</span><span id="length">0:00</span></div>
+
+            <div class="controls">
+                <button data-action="prev" aria-label="Previous track">
+                    <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+                </button>
+                <button data-action="playpause" class="primary" aria-label="Play or pause">
+                    <svg viewBox="0 0 24 24" id="icon-play"><path d="M8 5v14l11-7z"/></svg>
+                    <svg viewBox="0 0 24 24" id="icon-pause" hidden><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
+                </button>
+                <button data-action="next" aria-label="Next track">
+                    <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6zM16 6v12h2V6z"/></svg>
+                </button>
+            </div>
+            <div class="controls small">
+                <button data-action="stop" aria-label="Stop">
+                    <svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
+                </button>
+                <button data-action="eject" aria-label="Eject">
+                    <svg viewBox="0 0 24 24"><path d="M5 17h14v2H5zm7-12L5.33 15h13.34z"/></svg>
+                </button>
+            </div>
+
+            <p class="error" id="error" hidden></p>
+        </section>
+
+        <details class="settings">
+            <summary>Settings</summary>
+            <form id="settings">
+                <div class="field">
+                    <label for="start_webhook">Start webhook</label>
+                    <div class="row">
+                        <input type="url" id="start_webhook" name="start_webhook"
+                               placeholder="http://homeassistant.local:8123/api/webhook/…">
+                        <button type="button" class="btn" data-test="start">Test</button>
+                    </div>
+                    <p class="hint" id="start_webhook_result">POSTed once a disc starts playing.</p>
+                </div>
+                <div class="field">
+                    <label for="stop_webhook">Stop webhook</label>
+                    <div class="row">
+                        <input type="url" id="stop_webhook" name="stop_webhook"
+                               placeholder="http://homeassistant.local:8123/api/webhook/…">
+                        <button type="button" class="btn" data-test="stop">Test</button>
+                    </div>
+                    <p class="hint" id="stop_webhook_result">POSTed when playback stops, ends, or the disc is ejected.</p>
+                </div>
+                <label class="check">
+                    <input type="checkbox" name="eject_when_finished">
+                    Eject the disc when it finishes
+                </label>
+                <div class="row">
+                    <button type="submit" class="btn accent">Save</button>
+                    <span class="hint" id="saved"></span>
+                </div>
+            </form>
+        </details>
+    </main>
+</body>
+</html>
