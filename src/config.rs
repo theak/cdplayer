@@ -15,6 +15,9 @@ pub struct Config {
     pub stop_webhook: String,
     /// Eject the disc after its last track finishes (the drive has no eject button).
     pub eject_when_finished: bool,
+    /// Stop playback that's been paused this many minutes, which also fires the stop
+    /// webhook (so the receiver isn't left on). 0 = never.
+    pub stop_after_paused_minutes: u32,
     /// Playback volume, 0–100. Set from the remote's slider rather than the settings form.
     pub volume: u8,
 }
@@ -25,6 +28,7 @@ impl Default for Config {
             start_webhook: String::new(),
             stop_webhook: String::new(),
             eject_when_finished: true,
+            stop_after_paused_minutes: 5,
             volume: 100,
         }
     }

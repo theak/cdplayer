@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 use crate::AppState;
+use crate::config::Config;
 use crate::album::{self, Album};
 use crate::datadisc::{self, Art};
 use crate::drive::{DataReader, Disc, Drive, SECTORS_PER_SECOND, Toc, Track};
@@ -96,6 +97,8 @@ pub struct Player {
     /// The disc is in but shouldn't auto-play: it was stopped, finished, failed, or was
     /// already in when the drive appeared. Cleared when the disc leaves.
     hold: bool,
+    /// When playback was first seen paused, for stopping it after a while.
+    paused_since: Option<Instant>,
     error: Option<String>,
 }
 
@@ -114,6 +117,7 @@ impl Player {
             art: None,
             appeared_at: None,
             hold: false,
+            paused_since: None,
             error: None,
         }
     }
@@ -137,7 +141,7 @@ impl Player {
     }
 
     /// Reconcile with the drive. Returns background work for a newly inserted disc.
-    async fn poll(&mut self, eject_when_finished: bool, events: &mut Vec<Event>) -> Option<Lookup> {
+    async fn poll(&mut self, cfg: &Config, events: &mut Vec<Event>) -> Option<Lookup> {
         let disc = self.check_drive();
 
         // A SuperDrive comes up asleep after every power-on (boot, replug); wake it so it
@@ -161,7 +165,7 @@ impl Player {
             }
             self.hold = true;
             match outcome {
-                Outcome::Finished if eject_when_finished && disc.has_media() => {
+                Outcome::Finished if cfg.eject_when_finished && disc.has_media() => {
                     if let Err(e) = self.drive.eject() {
                         eprintln!("cdplayer: eject after finishing failed: {e}");
                     }
@@ -174,6 +178,18 @@ impl Player {
                 s.announced = true;
                 events.push(Event::Start);
             }
+        }
+
+        // Stop a disc left paused too long.
+        if self.session.as_ref().is_some_and(|s| s.playback.paused()) {
+            let since = *self.paused_since.get_or_insert_with(Instant::now);
+            let limit = Duration::from_secs(u64::from(cfg.stop_after_paused_minutes) * 60);
+            if cfg.stop_after_paused_minutes > 0 && since.elapsed() >= limit {
+                self.end_session(events).await;
+                self.hold = true;
+            }
+        } else {
+            self.paused_since = None;
         }
 
         let mut lookup = None;
@@ -429,14 +445,9 @@ impl Player {
 
 /// One reconcile pass against the drive.
 pub async fn tick(state: &AppState) {
-    let eject_when_finished = state.config.read().await.eject_when_finished;
+    let cfg = state.config.read().await.clone();
     let mut events = Vec::new();
-    let lookup = state
-        .player
-        .lock()
-        .await
-        .poll(eject_when_finished, &mut events)
-        .await;
+    let lookup = state.player.lock().await.poll(&cfg, &mut events).await;
     webhook::fire(state, events);
     match lookup {
         Some(Lookup::MusicBrainz(toc)) => {

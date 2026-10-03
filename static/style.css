@@ -226,6 +226,17 @@ input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); ou
 .row .hint { margin: 0; }
 .check { display: flex; gap: 0.6rem; align-items: center; cursor: pointer; }
 .check input { width: 1.1rem; height: 1.1rem; accent-color: var(--accent); }
+.check input.minutes {
+    width: 3.2rem;
+    height: auto;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    text-align: center;
+}
 .btn {
     padding: 0.6rem 1rem;
     border: none;

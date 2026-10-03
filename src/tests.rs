@@ -114,11 +114,13 @@ async fn settings_round_trip() {
     let (_, body) = send(app.clone(), "GET", "/api/config", None).await;
     assert_eq!(body["start_webhook"], "");
     assert_eq!(body["eject_when_finished"], true);
+    assert_eq!(body["stop_after_paused_minutes"], 5);
 
     let new = json!({
         "start_webhook": "  http://ha.local:8123/api/webhook/cd-start ",
         "stop_webhook": "https://ha.local/api/webhook/cd-stop",
         "eject_when_finished": false,
+        "stop_after_paused_minutes": 0,
     });
     let (code, body) = send(app.clone(), "POST", "/api/config", Some(new)).await;
     assert_eq!(code, StatusCode::OK);
@@ -128,6 +130,7 @@ async fn settings_round_trip() {
     let saved = config::load(&path);
     assert_eq!(saved.start_webhook, "http://ha.local:8123/api/webhook/cd-start");
     assert!(!saved.eject_when_finished);
+    assert_eq!(saved.stop_after_paused_minutes, 0);
     let (_, body) = send(app, "GET", "/api/config", None).await;
     assert_eq!(body["stop_webhook"], "https://ha.local/api/webhook/cd-stop");
 }

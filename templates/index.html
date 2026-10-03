@@ -91,6 +91,13 @@
                     <input type="checkbox" name="eject_when_finished">
                     Eject the disc when it finishes
                 </label>
+                <label class="check">
+                    <input type="checkbox" name="stop_when_paused">
+                    Stop after
+                    <input type="number" name="stop_after_paused_minutes" class="minutes"
+                           min="1" max="999" value="5" aria-label="Minutes">
+                    min paused
+                </label>
                 <div class="row">
                     <button type="submit" class="btn accent">Save</button>
                     <span class="hint" id="saved"></span>
