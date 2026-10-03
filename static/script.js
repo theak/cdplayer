@@ -208,6 +208,7 @@ async function loadSettings() {
     form.eject_when_finished.checked = cfg.eject_when_finished;
     form.mqtt_broker.value = cfg.mqtt_broker;
     form.mqtt_topic.value = cfg.mqtt_topic;
+    $('mqtt').open = Boolean(cfg.mqtt_broker);
     // 0 minutes means never: shown unchecked, keeping the default ready for re-checking.
     form.stop_when_paused.checked = cfg.stop_after_paused_minutes > 0;
     form.stop_after_paused_minutes.value = cfg.stop_after_paused_minutes || 5;

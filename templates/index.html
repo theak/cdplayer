@@ -69,16 +69,6 @@
         <details class="settings">
             <summary>Settings</summary>
             <form id="settings">
-                <div class="field">
-                    <label for="mqtt_broker">Home Assistant (MQTT)</label>
-                    <div class="row">
-                        <input type="url" id="mqtt_broker" name="mqtt_broker"
-                               placeholder="mqtt://user:password@homeassistant.local:1883">
-                        <input type="text" name="mqtt_topic" class="topic" aria-label="Topic"
-                               placeholder="shairport">
-                    </div>
-                    <p class="hint">Appears as the Shairport Sync player on this topic.</p>
-                </div>
                 <label class="check">
                     <input type="checkbox" name="eject_when_finished">
                     Eject the disc when it finishes
@@ -90,10 +80,24 @@
                            min="1" max="999" value="5" aria-label="Minutes">
                     min paused
                 </label>
-                <!-- Mostly superseded by MQTT: tucked away, open only when one is set. -->
-                <details class="webhooks" id="webhooks">
+                <!-- Collapsed unless configured, like the webhooks below. -->
+                <details class="section" id="mqtt">
+                    <summary>MQTT</summary>
+                    <div class="section-fields">
+                        <div class="field">
+                            <div class="row">
+                                <input type="url" id="mqtt_broker" name="mqtt_broker" aria-label="Broker"
+                                       placeholder="mqtt://user:password@homeassistant.local:1883">
+                                <input type="text" name="mqtt_topic" class="topic" aria-label="Topic"
+                                       placeholder="shairport">
+                            </div>
+                            <p class="hint">Appears in Home Assistant as the Shairport Sync player on this topic.</p>
+                        </div>
+                    </div>
+                </details>
+                <details class="section" id="webhooks">
                     <summary>Webhooks</summary>
-                    <div class="webhook-fields">
+                    <div class="section-fields">
                         <div class="field">
                             <label for="start_webhook">Start webhook</label>
                             <div class="row">
