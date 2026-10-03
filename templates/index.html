@@ -70,24 +70,6 @@
             <summary>Settings</summary>
             <form id="settings">
                 <div class="field">
-                    <label for="start_webhook">Start webhook</label>
-                    <div class="row">
-                        <input type="url" id="start_webhook" name="start_webhook"
-                               placeholder="http://homeassistant.local:8123/api/webhook/…">
-                        <button type="button" class="btn" data-test="start">Test</button>
-                    </div>
-                    <p class="hint" id="start_webhook_result">POSTed once a disc starts playing.</p>
-                </div>
-                <div class="field">
-                    <label for="stop_webhook">Stop webhook</label>
-                    <div class="row">
-                        <input type="url" id="stop_webhook" name="stop_webhook"
-                               placeholder="http://homeassistant.local:8123/api/webhook/…">
-                        <button type="button" class="btn" data-test="stop">Test</button>
-                    </div>
-                    <p class="hint" id="stop_webhook_result">POSTed when playback stops, ends, or the disc is ejected.</p>
-                </div>
-                <div class="field">
                     <label for="mqtt_broker">Home Assistant (MQTT)</label>
                     <div class="row">
                         <input type="url" id="mqtt_broker" name="mqtt_broker"
@@ -108,6 +90,30 @@
                            min="1" max="999" value="5" aria-label="Minutes">
                     min paused
                 </label>
+                <!-- Mostly superseded by MQTT: tucked away, open only when one is set. -->
+                <details class="webhooks" id="webhooks">
+                    <summary>Webhooks</summary>
+                    <div class="webhook-fields">
+                        <div class="field">
+                            <label for="start_webhook">Start webhook</label>
+                            <div class="row">
+                                <input type="url" id="start_webhook" name="start_webhook"
+                                       placeholder="http://homeassistant.local:8123/api/webhook/…">
+                                <button type="button" class="btn" data-test="start">Test</button>
+                            </div>
+                            <p class="hint" id="start_webhook_result">POSTed once a disc starts playing.</p>
+                        </div>
+                        <div class="field">
+                            <label for="stop_webhook">Stop webhook</label>
+                            <div class="row">
+                                <input type="url" id="stop_webhook" name="stop_webhook"
+                                       placeholder="http://homeassistant.local:8123/api/webhook/…">
+                                <button type="button" class="btn" data-test="stop">Test</button>
+                            </div>
+                            <p class="hint" id="stop_webhook_result">POSTed when playback stops, ends, or the disc is ejected.</p>
+                        </div>
+                    </div>
+                </details>
                 <div class="row">
                     <button type="submit" class="btn accent">Save</button>
                     <span class="hint" id="saved"></span>

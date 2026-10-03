@@ -204,6 +204,7 @@ async function loadSettings() {
     const cfg = await (await fetch('/api/config')).json();
     form.start_webhook.value = cfg.start_webhook;
     form.stop_webhook.value = cfg.stop_webhook;
+    $('webhooks').open = Boolean(cfg.start_webhook || cfg.stop_webhook);
     form.eject_when_finished.checked = cfg.eject_when_finished;
     form.mqtt_broker.value = cfg.mqtt_broker;
     form.mqtt_topic.value = cfg.mqtt_topic;
