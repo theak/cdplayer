@@ -20,6 +20,8 @@ symphonia = { version = "0.5", default-features = false, features = ["mp3", "fla
 # rustls + bundled Mozilla roots, so HTTPS webhook URLs validate without relying on the
 # runtime image's CA store. default-features=false drops the native-tls/OpenSSL backend.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+# Showing up in Home Assistant as a Shairport Sync player (plain TCP, so no TLS features).
+rumqttc = { version = "0.24", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

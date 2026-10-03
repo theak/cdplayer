@@ -588,3 +588,58 @@ async fn plays_disc_image() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(playback.outcome().is_some(), "should finish after the last track");
 }
+
+#[test]
+fn mqtt_broker_urls() {
+    use crate::mqtt::Broker;
+    let b = Broker::parse("mqtt://me:p@ss:word@10.0.0.2:1884").unwrap();
+    assert_eq!(format!("{b:?}"), r#"Broker { host: "10.0.0.2", port: 1884, credentials: Some(("me", "p@ss:word")) }"#);
+    let b = Broker::parse("mqtt://broker.local").unwrap();
+    assert_eq!(format!("{b:?}"), r#"Broker { host: "broker.local", port: 1883, credentials: None }"#);
+    assert!(Broker::parse("http://broker.local").is_none());
+    assert!(Broker::parse("mqtt://host:notaport").is_none());
+    assert!(Broker::parse("mqtt://").is_none());
+
+    let bad = Config { mqtt_broker: "broker.local".into(), ..Config::default() };
+    assert!(bad.normalized().is_err());
+    let bad = Config { mqtt_topic: "shairport/#".into(), ..Config::default() };
+    assert!(bad.normalized().is_err());
+}
+
+#[test]
+fn mqtt_messages_follow_playback() {
+    use crate::mqtt::{messages, needs_cover};
+    use crate::player::{Activity, NowPlaying};
+    let topics = |prev: &NowPlaying, now: &NowPlaying| -> Vec<&str> {
+        messages(prev, now).into_iter().map(|(t, _)| t).collect()
+    };
+    let idle = NowPlaying::default();
+    let track = |title: &str, activity| NowPlaying {
+        activity,
+        title: title.into(),
+        artist: "Jamiroquai".into(),
+        album: "The Return of the Space Cowboy".into(),
+        cover: Some("https://example.com/front".into()),
+    };
+    let one = track("Just Another Story", Activity::Playing);
+    let paused = track("Just Another Story", Activity::Paused);
+    let two = track("Stillness in Time", Activity::Playing);
+
+    // Track info first, then the state message that makes Home Assistant show it.
+    assert_eq!(topics(&idle, &one), ["title", "artist", "album", "play_start"]);
+    assert_eq!(messages(&idle, &one)[0].1, "Just Another Story");
+    assert!(needs_cover(&idle, &one));
+    // Nothing changed, nothing sent.
+    assert!(topics(&one, &one).is_empty());
+    assert!(!needs_cover(&one, &one));
+    // Pause is a flush, not play_end (which automations treat as "done").
+    assert_eq!(topics(&one, &paused), ["play_flush"]);
+    assert_eq!(topics(&paused, &one), ["play_resume"]);
+    // A new track: new info, then a state message to refresh it. Same cover, not resent.
+    assert_eq!(topics(&one, &two), ["title", "artist", "album", "play_resume"]);
+    assert!(!needs_cover(&one, &two));
+    // Stopping ends the session, which also clears the info in Home Assistant.
+    assert_eq!(topics(&two, &idle), ["play_end", "active_end"]);
+    assert!(topics(&idle, &idle).is_empty());
+    assert!(!needs_cover(&two, &idle));
+}

@@ -123,6 +123,7 @@ pub async fn save_config(State(state): State<AppState>, Json(cfg): Json<Config>)
         );
     }
     *state.config.write().await = cfg.clone();
+    state.mqtt_reload.notify_one();
     Json(cfg).into_response()
 }
 
@@ -134,13 +135,7 @@ pub struct VolumeRequest {
 /// POST `/api/volume` `{"volume": 0-100}` — set the playback volume, now and for later
 /// discs.
 pub async fn set_volume(State(state): State<AppState>, Json(req): Json<VolumeRequest>) -> Response {
-    let volume = req.volume.min(100);
-    state.player.lock().await.set_volume(volume);
-    let mut cfg = state.config.write().await;
-    cfg.volume = volume;
-    if let Err(e) = config::save(&state.config_path, &cfg) {
-        eprintln!("cdplayer: couldn't save volume: {e}");
-    }
+    let volume = player::set_volume(&state, req.volume).await;
     Json(json!({ "volume": volume })).into_response()
 }
 

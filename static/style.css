@@ -210,7 +210,8 @@ main {
 .field label { display: block; margin-bottom: 0.35rem; font-weight: 500; }
 .row { display: flex; gap: 0.5rem; align-items: center; }
 .row input { flex: 1; min-width: 0; }
-input[type="url"] {
+.row input.topic { flex: 0 0 6.5rem; }
+input[type="url"], input[type="text"] {
     padding: 0.6rem 0.75rem;
     background: var(--bg);
     border: 1px solid var(--border);

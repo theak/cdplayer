@@ -443,6 +443,73 @@ impl Player {
     }
 }
 
+/// Whether a disc is playing, for reporting elsewhere (MQTT).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Activity {
+    #[default]
+    Idle,
+    Playing,
+    Paused,
+}
+
+/// What's playing, as reported to Home Assistant over MQTT.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NowPlaying {
+    pub activity: Activity,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// Cover art URL: remote, or `/api/art/...` for art read off a data disc.
+    pub cover: Option<String>,
+}
+
+impl Player {
+    pub fn now_playing(&self) -> NowPlaying {
+        let Some(s) = self.session.as_ref().filter(|s| s.playback.started() || s.playback.paused()) else {
+            return NowPlaying::default();
+        };
+        let i = s.playback.track();
+        let album = self.album.as_ref();
+        let track = album.and_then(|a| a.tracks.get(i));
+        let nonempty = |s: &String| !s.is_empty();
+        NowPlaying {
+            activity: if s.playback.paused() { Activity::Paused } else { Activity::Playing },
+            title: track
+                .map(|t| t.title.clone())
+                .filter(nonempty)
+                .unwrap_or_else(|| format!("Track {}", i + 1)),
+            artist: track
+                .map(|t| t.artist.clone())
+                .filter(nonempty)
+                .or_else(|| album.map(|a| a.artist.clone()))
+                .unwrap_or_default(),
+            album: album.map(|a| a.title.clone()).unwrap_or_default(),
+            cover: album.and_then(|a| a.cover.clone()),
+        }
+    }
+
+    /// Whether Play would start the disc in the drive.
+    pub fn can_start(&self) -> bool {
+        self.program.is_some() && self.session.is_none()
+    }
+
+    pub fn volume(&self) -> u8 {
+        self.gain.percent()
+    }
+}
+
+/// Set the playback volume now and for later discs.
+pub async fn set_volume(state: &AppState, volume: u8) -> u8 {
+    let volume = volume.min(100);
+    state.player.lock().await.set_volume(volume);
+    let mut cfg = state.config.write().await;
+    cfg.volume = volume;
+    if let Err(e) = crate::config::save(&state.config_path, &cfg) {
+        eprintln!("cdplayer: couldn't save volume: {e}");
+    }
+    volume
+}
+
 /// One reconcile pass against the drive.
 pub async fn tick(state: &AppState) {
     let cfg = state.config.read().await.clone();

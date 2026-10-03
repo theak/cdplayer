@@ -13,6 +13,7 @@ mod datadisc;
 mod drive;
 mod handlers;
 mod iso9660;
+mod mqtt;
 mod playback;
 mod player;
 #[cfg(test)]
@@ -71,6 +72,8 @@ pub struct AppState {
     /// Cached album info, one JSON file per disc ID.
     pub albums_dir: Arc<PathBuf>,
     pub client: reqwest::Client,
+    /// Signalled when the settings change, so the MQTT link reconnects with them.
+    pub mqtt_reload: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -91,6 +94,7 @@ impl AppState {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("failed to build HTTP client"),
+            mqtt_reload: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -155,6 +159,8 @@ async fn main() {
         }
     });
 
+    tokio::spawn(mqtt::run(state.clone()));
+
     let addr = SocketAddr::from(([0, 0, 0, 0], settings.port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -166,4 +172,5 @@ async fn main() {
         .await
         .expect("server error");
     player::shutdown(&state).await;
+    mqtt::settle(&state).await;
 }

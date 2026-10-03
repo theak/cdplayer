@@ -13,6 +13,7 @@ Super simple Rust web app / docker container for playing physical CDs via a nice
 - **Volume control** that scales only the CD player's own audio, so the system volume (and AirPlay's level) is untouched. It's remembered across restarts.
 - **Software eject**, since drives like the Apple SuperDrive have no eject button. Optionally ejects automatically when the disc finishes.
 - **Start/stop webhooks**, configured from the remote's Settings panel. `start` fires only once audio is actually playing, so a failed start never powers your receiver on; `stop` fires on stop, eject, end of disc, errors, and container shutdown. Each is a `POST` with body `{"event": "start"}` or `{"event": "stop"}`.
+- **Home Assistant media player over MQTT**: set an MQTT broker in Settings and the CD player publishes as a [Shairport Sync](https://github.com/mikebrady/shairport-sync) player on the same topic, so the [hass-shairport-sync](https://github.com/parautenbach/hass-shairport-sync) integration shows what's playing (with cover art) and its play/pause/next/previous/stop/volume buttons control the CD. Since AirPlay and the CD can't play at once, they can share one Home Assistant player.
 - **Apple USB SuperDrive support**: the drive is sent Apple's wake-up command whenever it appears, so it takes discs on non-Mac hardware.
 
 The sound card is held exclusively while a CD plays. If something else (e.g. an AirPlay receiver like shairport-sync) is using it, playback fails with a message instead of fighting over it.

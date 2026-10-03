@@ -205,6 +205,8 @@ async function loadSettings() {
     form.start_webhook.value = cfg.start_webhook;
     form.stop_webhook.value = cfg.stop_webhook;
     form.eject_when_finished.checked = cfg.eject_when_finished;
+    form.mqtt_broker.value = cfg.mqtt_broker;
+    form.mqtt_topic.value = cfg.mqtt_topic;
     // 0 minutes means never: shown unchecked, keeping the default ready for re-checking.
     form.stop_when_paused.checked = cfg.stop_after_paused_minutes > 0;
     form.stop_after_paused_minutes.value = cfg.stop_after_paused_minutes || 5;
@@ -224,6 +226,8 @@ async function saveSettings(e) {
             start_webhook: form.start_webhook.value,
             stop_webhook: form.stop_webhook.value,
             eject_when_finished: form.eject_when_finished.checked,
+            mqtt_broker: form.mqtt_broker.value,
+            mqtt_topic: form.mqtt_topic.value || 'shairport',
             stop_after_paused_minutes: form.stop_when_paused.checked
                 ? Math.max(1, Math.round(Number(form.stop_after_paused_minutes.value) || 5))
                 : 0,

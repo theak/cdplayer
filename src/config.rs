@@ -18,6 +18,11 @@ pub struct Config {
     /// Stop playback that's been paused this many minutes, which also fires the stop
     /// webhook (so the receiver isn't left on). 0 = never.
     pub stop_after_paused_minutes: u32,
+    /// MQTT broker, as `mqtt://user:password@host:port`, for showing up in Home Assistant
+    /// as a Shairport Sync player. Empty = disabled.
+    pub mqtt_broker: String,
+    /// The Shairport Sync MQTT topic to publish as and take remote commands from.
+    pub mqtt_topic: String,
     /// Playback volume, 0–100. Set from the remote's slider rather than the settings form.
     pub volume: u8,
 }
@@ -29,6 +34,8 @@ impl Default for Config {
             stop_webhook: String::new(),
             eject_when_finished: true,
             stop_after_paused_minutes: 5,
+            mqtt_broker: String::new(),
+            mqtt_topic: "shairport".into(),
             volume: 100,
         }
     }
@@ -45,6 +52,14 @@ impl Config {
             if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(format!("{label} must start with http:// or https://"));
             }
+        }
+        self.mqtt_broker = self.mqtt_broker.trim().to_string();
+        if !self.mqtt_broker.is_empty() && crate::mqtt::Broker::parse(&self.mqtt_broker).is_none() {
+            return Err("MQTT broker must look like mqtt://user:password@host:1883".into());
+        }
+        self.mqtt_topic = self.mqtt_topic.trim().trim_matches('/').to_string();
+        if self.mqtt_topic.is_empty() || self.mqtt_topic.contains(['#', '+']) {
+            return Err("MQTT topic can't be blank or contain wildcards".into());
         }
         self.volume = self.volume.min(100);
         Ok(self)

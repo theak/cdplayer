@@ -87,6 +87,16 @@
                     </div>
                     <p class="hint" id="stop_webhook_result">POSTed when playback stops, ends, or the disc is ejected.</p>
                 </div>
+                <div class="field">
+                    <label for="mqtt_broker">Home Assistant (MQTT)</label>
+                    <div class="row">
+                        <input type="url" id="mqtt_broker" name="mqtt_broker"
+                               placeholder="mqtt://user:password@homeassistant.local:1883">
+                        <input type="text" name="mqtt_topic" class="topic" aria-label="Topic"
+                               placeholder="shairport">
+                    </div>
+                    <p class="hint">Appears as the Shairport Sync player on this topic.</p>
+                </div>
                 <label class="check">
                     <input type="checkbox" name="eject_when_finished">
                     Eject the disc when it finishes
