@@ -2,15 +2,21 @@
 //! hass-shairport-sync integration: it publishes the messages shairport-sync would (track
 //! info, cover, play/pause/stop) and takes the integration's remote commands.
 //!
+//! It also announces a "CD Player" device through Home Assistant's MQTT discovery, on its
+//! own `cdplayer/` topics: a Disc sensor (on while a disc is in the drive) and an Eject
+//! button.
+//!
 //! shairport-sync hears those commands too. That's fine because the two can't play at
 //! once: while a disc is playing or paused every command is ours (AirPlay has no session),
 //! and when stopped we only take Play, and only while AirPlay isn't active.
 
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS};
+use serde_json::json;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::AppState;
+use crate::drive::Disc;
 use crate::player::{self, Action, Activity, NowPlaying};
 
 const POLL: Duration = Duration::from_millis(500);
@@ -18,6 +24,14 @@ const RETRY: Duration = Duration::from_secs(5);
 /// Cover art can be a few hundred KB.
 const MAX_PACKET: usize = 8 << 20;
 const VOLUME_STEP: u8 = 5;
+
+/// Topics for the discovered device, apart from the Shairport Sync ones.
+const AVAILABILITY: &str = "cdplayer/availability";
+const DISC: &str = "cdplayer/disc";
+const EJECT: &str = "cdplayer/eject";
+const DISCOVERY_PREFIX: &str = "homeassistant";
+/// Home Assistant says "online" here when it starts, which is the cue to announce again.
+const HA_STATUS: &str = "homeassistant/status";
 
 /// Where to connect, parsed from `mqtt://user:password@host:port`.
 #[derive(Debug, PartialEq, Eq)]
@@ -82,6 +96,8 @@ async fn link(state: &AppState, broker: Broker, topic: &str) {
     let mut options = MqttOptions::new("cdplayer", broker.host, broker.port);
     options.set_keep_alive(Duration::from_secs(30));
     options.set_max_packet_size(MAX_PACKET, MAX_PACKET);
+    // If we drop off without saying goodbye, the broker marks the device offline.
+    options.set_last_will(LastWill::new(AVAILABILITY, "offline", QoS::AtLeastOnce, true));
     if let Some((user, password)) = broker.credentials {
         options.set_credentials(user, password);
     }
@@ -111,6 +127,7 @@ async fn link(state: &AppState, broker: Broker, topic: &str) {
     let remote = format!("{topic}/remote");
     let (active_start, active_end) = (format!("{topic}/active_start"), format!("{topic}/active_end"));
     let mut reported = NowPlaying::default();
+    let mut reported_disc = None;
     let mut airplay_active = false;
     let mut poll = tokio::time::interval(POLL);
     loop {
@@ -118,11 +135,27 @@ async fn link(state: &AppState, broker: Broker, topic: &str) {
             _ = state.mqtt_reload.notified() => break,
             Some(incoming) = rx.recv() => match incoming {
                 Incoming::Connected => {
-                    for t in [&remote, &active_start, &active_end] {
-                        let _ = client.subscribe(t.as_str(), QoS::AtMostOnce).await;
+                    for t in [remote.as_str(), &active_start, &active_end, EJECT, HA_STATUS] {
+                        let _ = client.subscribe(t, QoS::AtMostOnce).await;
                     }
+                    announce(&client).await;
                     // A fresh session: report everything again.
                     reported = NowPlaying::default();
+                    reported_disc = None;
+                }
+                Incoming::Message(t, payload) if t == HA_STATUS => {
+                    // Home Assistant restarted: announce again and resend the disc state.
+                    if payload == b"online" {
+                        announce(&client).await;
+                        reported_disc = None;
+                        poll.reset_immediately();
+                    }
+                }
+                Incoming::Message(t, _) if t == EJECT => {
+                    if let Err(e) = player::control(state, Action::Eject).await {
+                        eprintln!("cdplayer: MQTT: eject: {e}");
+                    }
+                    poll.reset_immediately();
                 }
                 // Only shairport-sync sends active_start; both of us send active_end.
                 Incoming::Message(t, _) if t == active_start => airplay_active = true,
@@ -133,7 +166,15 @@ async fn link(state: &AppState, broker: Broker, topic: &str) {
                 }
             },
             _ = poll.tick() => {
-                let now = state.player.lock().await.now_playing();
+                let (now, disc) = {
+                    let p = state.player.lock().await;
+                    (p.now_playing(), p.disc())
+                };
+                let disc = disc_payload(disc);
+                if reported_disc != Some(disc) {
+                    publish_retained(&client, DISC, disc).await;
+                    reported_disc = Some(disc);
+                }
                 for (subtopic, payload) in messages(&reported, &now) {
                     publish(&client, topic, subtopic, payload.into_bytes()).await;
                 }
@@ -144,8 +185,59 @@ async fn link(state: &AppState, broker: Broker, topic: &str) {
             }
         }
     }
+    // A clean disconnect doesn't trigger the last will, so say it ourselves.
+    publish_retained(&client, AVAILABILITY, "offline").await;
     driver.abort();
     let _ = client.disconnect().await;
+}
+
+/// Tell Home Assistant about the device's entities (retained, so it still knows them after
+/// a restart), and that it's online.
+async fn announce(client: &AsyncClient) {
+    for (topic, config) in discovery() {
+        publish_retained(client, &topic, &config).await;
+    }
+    publish_retained(client, AVAILABILITY, "online").await;
+}
+
+/// The discovery config topics and payloads for the Disc sensor and the Eject button.
+pub(crate) fn discovery() -> Vec<(String, String)> {
+    let device = json!({
+        "identifiers": ["cdplayer"],
+        "name": "CD Player",
+        "sw_version": env!("CARGO_PKG_VERSION"),
+    });
+    let disc = json!({
+        "name": "Disc",
+        "unique_id": "cdplayer_disc",
+        "icon": "mdi:disc",
+        "state_topic": DISC,
+        "availability_topic": AVAILABILITY,
+        "device": device,
+    });
+    let eject = json!({
+        "name": "Eject",
+        "unique_id": "cdplayer_eject",
+        "icon": "mdi:eject",
+        "command_topic": EJECT,
+        "availability_topic": AVAILABILITY,
+        "device": device,
+    });
+    vec![
+        (format!("{DISCOVERY_PREFIX}/binary_sensor/cdplayer/disc/config"), disc.to_string()),
+        (format!("{DISCOVERY_PREFIX}/button/cdplayer/eject/config"), eject.to_string()),
+    ]
+}
+
+/// The Disc sensor's state: on for any disc, audio or data.
+pub(crate) fn disc_payload(disc: Disc) -> &'static str {
+    if disc.has_media() { "ON" } else { "OFF" }
+}
+
+async fn publish_retained(client: &AsyncClient, topic: &str, payload: &str) {
+    if let Err(e) = client.publish(topic, QoS::AtLeastOnce, true, payload.as_bytes().to_vec()).await {
+        eprintln!("cdplayer: MQTT: couldn't publish {topic}: {e}");
+    }
 }
 
 async fn publish(client: &AsyncClient, topic: &str, subtopic: &str, payload: Vec<u8>) {

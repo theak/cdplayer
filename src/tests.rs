@@ -643,3 +643,30 @@ fn mqtt_messages_follow_playback() {
     assert!(topics(&idle, &idle).is_empty());
     assert!(!needs_cover(&two, &idle));
 }
+
+#[test]
+fn mqtt_discovery_announces_disc_and_eject() {
+    use crate::drive::Disc;
+    use crate::mqtt::{discovery, disc_payload};
+    let configs: Vec<(String, Value)> = discovery()
+        .into_iter()
+        .map(|(topic, payload)| (topic, serde_json::from_str(&payload).unwrap()))
+        .collect();
+    let topics: Vec<&str> = configs.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(
+        topics,
+        ["homeassistant/binary_sensor/cdplayer/disc/config", "homeassistant/button/cdplayer/eject/config"]
+    );
+    let (disc, eject) = (&configs[0].1, &configs[1].1);
+    assert_eq!(disc["state_topic"], "cdplayer/disc");
+    assert_eq!(eject["command_topic"], "cdplayer/eject");
+    // Both belong to one device and go unavailable together.
+    assert_eq!(disc["device"], eject["device"]);
+    assert_eq!(disc["availability_topic"], eject["availability_topic"]);
+    assert_ne!(disc["unique_id"], eject["unique_id"]);
+
+    assert_eq!(disc_payload(Disc::Audio), "ON");
+    assert_eq!(disc_payload(Disc::Data), "ON");
+    assert_eq!(disc_payload(Disc::Empty), "OFF");
+    assert_eq!(disc_payload(Disc::Missing), "OFF");
+}

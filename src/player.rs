@@ -496,6 +496,10 @@ impl Player {
     pub fn volume(&self) -> u8 {
         self.gain.percent()
     }
+
+    pub fn disc(&self) -> Disc {
+        self.disc
+    }
 }
 
 /// Set the playback volume now and for later discs.
