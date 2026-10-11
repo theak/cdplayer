@@ -334,7 +334,25 @@ async fn send_cover(state: AppState, client: AsyncClient, topic: String, cover: 
     publish(&client, &topic, "cover", image).await;
 }
 
+/// Cover Art Archive images are served from archive.org, which often errors or times out
+/// on the first try, so give it a few.
+const COVER_TRIES: u32 = 3;
+
 async fn fetch(client: &reqwest::Client, url: &str) -> reqwest::Result<Vec<u8>> {
+    let mut tries = 1;
+    loop {
+        match fetch_once(client, url).await {
+            Err(e) if tries < COVER_TRIES => {
+                eprintln!("cdplayer: MQTT: couldn't fetch cover {url} (try {tries}): {e}");
+                tries += 1;
+                tokio::time::sleep(RETRY).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn fetch_once(client: &reqwest::Client, url: &str) -> reqwest::Result<Vec<u8>> {
     let response = client.get(url).send().await?.error_for_status()?;
     Ok(response.bytes().await?.to_vec())
 }
